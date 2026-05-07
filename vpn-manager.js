@@ -87,22 +87,19 @@ class VpnManager extends EventEmitter {
       return { error: `Config file not found: ${env.configFile}` };
 
     // Build the password line: use cached auth-token when reconnecting without TOTP.
-    // TOTP is NOT concatenated — it is sent as a challenge-response via the management
-    // socket when the server asks for it (>CR_TEXT:). The auth file only holds the
-    // base password so the server can issue the challenge.
+    // This server expects password+TOTP concatenated (no challenge-response).
     let passwordLine;
     conn.pendingTotp = totp || null;
     if (conn.authToken && !totp) {
       passwordLine = conn.authToken;
       this._log(id, 'Reconnecting with cached session token (no TOTP needed)…', 'sys');
+    } else if (totp) {
+      passwordLine = env.password + totp;
+      conn.authToken = null;
+      this._log(id, 'Connecting with password + TOTP…', 'sys');
     } else {
       passwordLine = env.password;
-      conn.authToken = null;
-      if (totp) {
-        this._log(id, 'Connecting — TOTP ready for server challenge…', 'sys');
-      } else {
-        this._log(id, 'Connecting…', 'sys');
-      }
+      this._log(id, 'Connecting…', 'sys');
     }
 
     // Write temp credentials file (chmod 600 — openvpn requires it)
