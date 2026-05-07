@@ -1,0 +1,1004 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Service Manager</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            bg: '#0d1117',
+            surface: '#161b22',
+            border: '#30363d',
+            muted: '#8b949e',
+          },
+          fontFamily: { mono: ['JetBrains Mono', 'Fira Code', 'monospace'] },
+        }
+      }
+    }
+  </script>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    body { background: #0d1117; color: #e6edf3; font-family: 'Inter', sans-serif; }
+
+    @keyframes pulse-green  { 0%,100%{opacity:1} 50%{opacity:.4} }
+    @keyframes pulse-yellow { 0%,100%{box-shadow:0 0 0 0 rgba(234,179,8,.4)} 70%{box-shadow:0 0 0 6px rgba(234,179,8,0)} }
+    .dot-running  { animation: pulse-green  2s ease-in-out infinite; }
+    .dot-starting,
+    .dot-stopping { animation: pulse-yellow 1.2s ease-in-out infinite; }
+
+    .log-entry { font-family: 'JetBrains Mono', monospace; font-size: 12px; line-height: 1.6; }
+    .log-err  { color: #f85149; }
+    .log-warn { color: #e3b341; }
+    .log-sys  { color: #6e7681; font-style: italic; }
+    .log-out  { color: #adbac7; }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #161b22; }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #484f58; }
+
+    .service-card { transition: border-color .15s, box-shadow .15s; }
+    .service-card:hover { border-color: #58a6ff !important; box-shadow: 0 0 0 1px rgba(88,166,255,.15); }
+
+    #log-panel { transition: transform .2s ease, opacity .2s ease; }
+    #log-panel.hidden { transform: translateY(100%); opacity: 0; pointer-events: none; }
+
+    .tab-btn.active { background: #1f6feb; color: #fff; }
+    .tab-btn { transition: background .12s; }
+    .btn { transition: opacity .12s, background .12s; }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+
+    /* VS Code connected glow */
+    .vscode-badge.connected { color: #3fb950; border-color: #3fb95050; }
+    .vscode-badge.disconnected { color: #6e7681; border-color: #30363d; }
+
+    /* Mode indicator */
+    .mode-vscode    { color: #58a6ff; }
+    .mode-external  { color: #d29922; }
+    .mode-spawn     { color: #6e7681; }
+
+    /* VPN */
+    .vpn-card { transition: border-color .15s, box-shadow .15s; }
+    .vpn-card:hover { border-color: #6e40c9 !important; box-shadow: 0 0 0 1px rgba(110,64,201,.15); }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<!-- ─── HEADER ─────────────────────────────────────────────────────────────── -->
+<header class="sticky top-0 z-40 border-b border-border bg-surface/95 backdrop-blur px-6 py-3">
+  <div class="max-w-screen-2xl mx-auto flex items-center justify-between gap-4 flex-wrap">
+    <div class="flex items-center gap-3">
+      <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center text-sm font-bold text-white">S</div>
+      <div>
+        <h1 class="text-sm font-semibold text-white leading-none">Service Manager</h1>
+        <p id="status-summary" class="text-xs text-muted mt-0.5">Connecting…</p>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2 flex-wrap">
+      <!-- VS Code connection badge -->
+      <div id="vscode-badge" class="vscode-badge disconnected inline-flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-full border bg-surface font-medium">
+        <svg width="12" height="12" viewBox="0 0 100 100" fill="currentColor">
+          <path d="M74.9,8.3L52.6,27.7L30.3,10L10,27.5L26.1,50L10,72.5L30.3,90L52.6,72.3L74.9,91.7L90,80.7V19.3L74.9,8.3z M74.9,67.9L56,50l18.9-17.9V67.9z"/>
+        </svg>
+        <span id="vscode-badge-text">VS Code disconnected</span>
+      </div>
+
+      <!-- WebSocket status -->
+      <span id="ws-badge" class="inline-flex items-center gap-1 text-xs px-2 py-1 rounded-full bg-surface border border-border text-muted">
+        <span class="w-1.5 h-1.5 rounded-full bg-gray-500"></span> offline
+      </span>
+
+      <button id="btn-start-all" class="btn text-xs px-3 py-1.5 rounded-md bg-green-700 hover:bg-green-600 text-white font-medium disabled:opacity-40">Start All</button>
+      <button id="btn-stop-all"  class="btn text-xs px-3 py-1.5 rounded-md bg-red-800  hover:bg-red-700  text-white font-medium disabled:opacity-40">Stop All</button>
+    </div>
+  </div>
+</header>
+
+<!-- ─── NAV TABS ──────────────────────────────────────────────────────────── -->
+<div class="sticky top-[57px] z-30 bg-bg border-b border-border px-6 py-2">
+  <div class="max-w-screen-2xl mx-auto flex gap-1 flex-wrap items-center">
+    <!-- Service filter tabs (hidden while VPN section is active) -->
+    <div id="service-filter-tabs" class="flex gap-1 flex-wrap">
+      <button class="tab-btn active text-xs px-3 py-1 rounded-md text-white font-medium" data-filter="all">All</button>
+      <button class="tab-btn text-xs px-3 py-1 rounded-md text-muted hover:text-white hover:bg-surface font-medium" data-filter="api">API</button>
+      <button class="tab-btn text-xs px-3 py-1 rounded-md text-muted hover:text-white hover:bg-surface font-medium" data-filter="b2b">B2B</button>
+      <button class="tab-btn text-xs px-3 py-1 rounded-md text-muted hover:text-white hover:bg-surface font-medium" data-filter="analytics">Analytics</button>
+      <button class="tab-btn text-xs px-3 py-1 rounded-md text-muted hover:text-white hover:bg-surface font-medium" data-filter="worker">Workers</button>
+      <button class="tab-btn text-xs px-3 py-1 rounded-md text-muted hover:text-white hover:bg-surface font-medium" data-filter="frontend">Frontend</button>
+    </div>
+    <!-- Section separator + VPN tab -->
+    <span class="text-border select-none px-1.5 text-xs hidden sm:inline" id="nav-separator">│</span>
+    <button id="tab-vpn" class="tab-btn text-xs px-3 py-1 rounded-md text-muted hover:text-white hover:bg-surface font-medium">
+      <svg class="inline w-3 h-3 mr-1 -mt-0.5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>VPN
+    </button>
+  </div>
+</div>
+
+<!-- ─── SERVICE GRID ───────────────────────────────────────────────────────── -->
+<main id="service-main" class="max-w-screen-2xl mx-auto px-6 py-5 pb-48">
+  <div id="service-grid" class="grid gap-3" style="grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));"></div>
+</main>
+
+<!-- ─── VPN PANEL ──────────────────────────────────────────────────────────── -->
+<div id="vpn-panel" class="hidden max-w-screen-2xl mx-auto px-6 py-5 pb-48">
+
+  <!-- Setup banner -->
+  <div id="vpn-setup-banner" class="hidden mb-5 p-4 rounded-xl border border-yellow-800 bg-yellow-900/20">
+    <p class="text-sm font-semibold text-yellow-300 mb-1">One-time setup required</p>
+    <p class="text-xs text-muted mb-3">Install <code class="font-mono text-yellow-200">openvpn</code> and allow it to run without a sudo password prompt.</p>
+    <div class="flex items-stretch gap-2">
+      <code id="vpn-setup-cmd" class="flex-1 text-xs font-mono bg-bg px-3 py-2 rounded border border-border text-yellow-200 overflow-x-auto whitespace-nowrap block"></code>
+      <button onclick="copySetupCmd()" class="btn text-xs px-3 py-2 rounded-md bg-yellow-800 hover:bg-yellow-700 text-yellow-100 border border-yellow-700 flex-shrink-0">Copy</button>
+    </div>
+    <p class="text-xs text-muted mt-2">After running, restart Service Manager (<kbd class="px-1 py-0.5 rounded bg-surface border border-border text-xs">node server.js</kbd>).</p>
+  </div>
+
+  <!-- VPN cards -->
+  <div id="vpn-grid" class="grid gap-4" style="grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));"></div>
+</div>
+
+<!-- ─── LOG PANEL ─────────────────────────────────────────────────────────── -->
+<div id="log-panel" class="hidden fixed bottom-0 left-0 right-0 z-50 border-t border-border bg-surface shadow-2xl" style="height: 320px;">
+  <div class="flex items-center justify-between px-4 py-2 border-b border-border">
+    <div class="flex items-center gap-2">
+      <span id="log-title" class="text-sm font-semibold text-white">Logs</span>
+      <span id="log-type-badge" class="text-xs px-2 py-0.5 rounded-full border font-medium"></span>
+      <span id="log-pid" class="text-xs text-muted font-mono"></span>
+      <span id="log-mode" class="text-xs font-mono"></span>
+    </div>
+    <div class="flex items-center gap-2">
+      <label class="flex items-center gap-1 text-xs text-muted cursor-pointer select-none">
+        <input type="checkbox" id="chk-autoscroll" checked class="w-3 h-3 accent-blue-500"> auto-scroll
+      </label>
+      <button id="btn-focus-vscode" class="btn hidden text-xs px-2 py-1 rounded bg-blue-900 border border-blue-700 text-blue-300 hover:bg-blue-800">
+        Open in VS Code
+      </button>
+      <button id="btn-log-clear" class="btn text-xs px-2 py-1 rounded bg-surface border border-border text-muted hover:text-white">Clear</button>
+      <button id="btn-log-close" class="btn text-xs px-2 py-1 rounded bg-surface border border-border text-muted hover:text-white">✕</button>
+    </div>
+  </div>
+  <div id="log-body" class="overflow-y-auto px-4 py-2" style="height: calc(100% - 41px);"></div>
+</div>
+
+
+<script>
+// ─── State ────────────────────────────────────────────────────────────────────
+const TYPE_COLORS = {
+  api:       { bg:'bg-blue-900/40',   text:'text-blue-300',   border:'border-blue-800' },
+  b2b:       { bg:'bg-purple-900/40', text:'text-purple-300', border:'border-purple-800' },
+  analytics: { bg:'bg-orange-900/40', text:'text-orange-300', border:'border-orange-800' },
+  worker:    { bg:'bg-gray-800/60',   text:'text-gray-400',   border:'border-gray-700' },
+  frontend:  { bg:'bg-teal-900/40',   text:'text-teal-300',   border:'border-teal-800' },
+};
+
+const STATUS_DOT = {
+  running:      'bg-green-400 dot-running',
+  starting:     'bg-yellow-400 dot-starting',
+  stopping:     'bg-yellow-500 dot-stopping',
+  stopped:      'bg-gray-600',
+  error:        'bg-red-500',
+  unconfigured: 'bg-gray-700',
+};
+
+const STATUS_LABEL = {
+  running:      { text:'Running',       cls:'text-green-400' },
+  starting:     { text:'Starting…',    cls:'text-yellow-400' },
+  stopping:     { text:'Stopping…',    cls:'text-yellow-500' },
+  stopped:      { text:'Stopped',       cls:'text-gray-500' },
+  error:        { text:'Error',         cls:'text-red-400' },
+  unconfigured: { text:'Unconfigured',  cls:'text-gray-600' },
+};
+
+const MODE_LABEL = {
+  vscode:   { text:'via VS Code', cls:'mode-vscode' },
+  external: { text:'external',    cls:'mode-external' },
+  spawn:    { text:'',            cls:'' },
+};
+
+let services         = {};
+let workerScripts    = {};   // { workerId: { folders: [{ name, scripts[] }] } }
+let lastWorkerRun    = {};   // { workerId: { termId, folder, script } }
+let workerSelections = {};   // { workerId: { folder, script } } — persists across re-renders
+let workerRunning    = {};   // { workerId: bool } — locks selects while running
+let activeFilter     = 'all';
+let openLogId       = null;
+let vscodeConnected = false;
+let ws              = null;
+let wsReconnectTimer = null;
+
+// VPN state
+let vpnData      = {};     // { id: VpnEnv }
+let vpnLogs      = {};     // { id: LogEntry[] }
+let openvpnPath  = null;
+let vpnSetupUser = '';
+let activeSection = 'services'; // 'services' | 'vpn'
+
+// ─── WebSocket ────────────────────────────────────────────────────────────────
+function connect() {
+  ws = new WebSocket(`ws://${location.host}`);
+
+  ws.addEventListener('open', () => {
+    setWsBadge(true);
+    clearTimeout(wsReconnectTimer);
+  });
+  ws.addEventListener('close', () => {
+    setWsBadge(false);
+    wsReconnectTimer = setTimeout(connect, 2500);
+  });
+  ws.addEventListener('error', () => setWsBadge(false));
+
+  ws.addEventListener('message', (e) => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case 'init':
+        msg.data.forEach(s => { services[s.id] = s; });
+        vscodeConnected = msg.vscodeConnected || false;
+        setVSCodeBadge(vscodeConnected);
+        renderAll();
+        updateSummary();
+        if (openLogId) wsSubscribeLogs(openLogId);
+        fetchWorkerScripts();
+        // VPN init
+        if (msg.vpnData) msg.vpnData.forEach(v => { vpnData[v.id] = v; });
+        openvpnPath  = msg.openvpnPath  || null;
+        vpnSetupUser = msg.setupUser    || '';
+        if (activeSection === 'vpn') renderVpn();
+        break;
+
+      case 'status':
+        if (services[msg.id]) {
+          Object.assign(services[msg.id], msg.data);
+          updateCard(msg.id);
+          updateSummary();
+          if (openLogId === msg.id) updateLogHeader();
+        }
+        break;
+
+      case 'vscode_status':
+        vscodeConnected = msg.connected;
+        setVSCodeBadge(msg.connected);
+        // Re-render cards so mode indicator and buttons update
+        renderAll();
+        break;
+
+      case 'uptime_tick':
+        msg.data.forEach(({ id, uptime }) => {
+          if (services[id]) {
+            services[id].uptime = uptime;
+            const el = document.getElementById(`uptime-${id}`);
+            if (el) el.textContent = formatUptime(uptime);
+          }
+        });
+        break;
+
+      case 'log_history':
+        if (msg.id === openLogId) {
+          clearLogBody();
+          msg.lines.forEach(l => appendLog(l.text, l.level, l.ts));
+        }
+        break;
+
+      case 'worker_stopped':
+        if (workerRunning[msg.workerId]) {
+          workerRunning[msg.workerId] = false;
+          const wcard = document.getElementById(`card-${msg.workerId}`);
+          if (wcard && services[msg.workerId]) {
+            const wtc = TYPE_COLORS[services[msg.workerId].type] || TYPE_COLORS.api;
+            wcard.innerHTML = workerCardHTML(services[msg.workerId], wtc);
+            wireWorkerCard(wcard, msg.workerId);
+          }
+        }
+        break;
+
+      case 'log':
+        if (msg.id === openLogId) appendLog(msg.text, msg.level, msg.ts);
+        break;
+
+      case 'vpn_status':
+        if (vpnData[msg.id]) {
+          Object.assign(vpnData[msg.id], msg.data);
+          renderVpnCard(msg.id);
+        }
+        break;
+
+      case 'vpn_log':
+        if (!vpnLogs[msg.id]) vpnLogs[msg.id] = [];
+        vpnLogs[msg.id].push(msg.entry);
+        if (vpnLogs[msg.id].length > 100) vpnLogs[msg.id].shift();
+        if (activeSection === 'vpn') appendVpnLog(msg.id, msg.entry);
+        break;
+
+      case 'vpn_auth_failed':
+        if (vpnData[msg.id]) {
+          vpnData[msg.id].needsTotp = true;
+          vpnData[msg.id].status = 'error';
+          if (!vpnLogs[msg.id]) vpnLogs[msg.id] = [];
+          renderVpnCard(msg.id);
+        }
+        break;
+
+      case 'vpn_needs_setup':
+        document.getElementById('vpn-setup-banner')?.classList.remove('hidden');
+        break;
+    }
+  });
+}
+
+function wsSend(obj) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify(obj));
+}
+function wsSubscribeLogs(id) { wsSend({ type: 'subscribe_logs', id }); }
+function wsUnsubscribeLogs(id) { wsSend({ type: 'unsubscribe_logs', id }); }
+
+// ─── Render ───────────────────────────────────────────────────────────────────
+function renderAll() {
+  const grid = document.getElementById('service-grid');
+  grid.innerHTML = '';
+  const list = Object.values(services);
+  const filtered = activeFilter === 'all' ? list : list.filter(s => s.type === activeFilter);
+  filtered.forEach(s => grid.appendChild(buildCard(s)));
+}
+
+function buildCard(s) {
+  const tc = TYPE_COLORS[s.type] || TYPE_COLORS.api;
+  const div = document.createElement('div');
+  div.id = `card-${s.id}`;
+  div.className = 'service-card rounded-xl border border-border bg-surface p-4 flex flex-col gap-3';
+  if (s.type === 'worker') {
+    div.innerHTML = workerCardHTML(s, tc);
+    wireWorkerCard(div, s.id);
+  } else {
+    div.innerHTML = cardHTML(s, tc);
+    wireCardButtons(div, s.id);
+  }
+  return div;
+}
+
+function cardHTML(s, tc) {
+  const sl  = STATUS_LABEL[s.status] || STATUS_LABEL.stopped;
+  const dot = STATUS_DOT[s.status]   || 'bg-gray-600';
+  const ml  = MODE_LABEL[s.mode]     || MODE_LABEL.spawn;
+
+  const canStart   = !s.note && (s.status === 'stopped' || s.status === 'error');
+  const canStop    = s.status === 'running' || s.status === 'starting';
+  const canRestart = canStop || s.status === 'error';
+  const isVSCode   = s.mode === 'vscode' || s.mode === 'external';
+
+  // VS Code badge on card (shown when running via VS Code or detected external)
+  const vscodePill = isVSCode
+    ? `<span class="text-xs px-1.5 py-0.5 rounded border border-blue-800 bg-blue-900/40 text-blue-400 font-mono ${ml.cls}">
+         <svg class="inline w-2.5 h-2.5 mr-0.5 -mt-0.5" viewBox="0 0 100 100" fill="currentColor"><path d="M74.9,8.3L52.6,27.7L30.3,10L10,27.5L26.1,50L10,72.5L30.3,90L52.6,72.3L74.9,91.7L90,80.7V19.3L74.9,8.3z M74.9,67.9L56,50l18.9-17.9V67.9z"/></svg>
+         ${s.mode === 'external' ? 'external' : 'VS Code'}
+       </span>`
+    : '';
+
+  const focusBtn = (isVSCode && canStop)
+    ? `<button data-action="focus" class="btn text-xs px-2 py-1.5 rounded-md font-medium bg-blue-900/50 hover:bg-blue-900 text-blue-300 border border-blue-900" title="Focus terminal in VS Code">⎋</button>`
+    : '';
+
+  return `
+    <div class="flex items-start justify-between gap-2">
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-sm text-white truncate">${s.name}</p>
+        <p class="text-xs text-muted font-mono truncate">${s.id}</p>
+      </div>
+      <span class="flex-shrink-0 text-xs px-2 py-0.5 rounded-full border font-medium ${tc.bg} ${tc.text} ${tc.border}">${s.type}</span>
+    </div>
+
+    <div class="flex items-center justify-between text-xs gap-2">
+      <div class="flex items-center gap-1.5 flex-wrap">
+        <span class="w-2 h-2 rounded-full flex-shrink-0 ${dot}"></span>
+        <span class="${sl.cls} font-medium">${sl.text}</span>
+        ${s.exitCode != null && s.status === 'error' ? `<span class="text-red-500 font-mono">code:${s.exitCode}</span>` : ''}
+        ${vscodePill}
+      </div>
+      <span class="text-muted font-mono flex-shrink-0">${s.port ? `<span class="text-blue-400">:${s.port}</span>` : 'no port'}</span>
+    </div>
+
+    <div class="text-xs text-muted font-mono h-4 truncate" id="uptime-${s.id}">
+      ${s.uptime ? formatUptime(s.uptime) : (s.note ? `<span class="italic text-gray-600 font-sans text-xs">${s.note.slice(0,58)}</span>` : '')}
+    </div>
+
+    <div class="flex gap-1.5 mt-auto">
+      <button data-action="start" ${canStart ? '' : 'disabled'}
+        class="btn flex-1 text-xs py-1.5 rounded-md font-medium bg-green-900/60 hover:bg-green-800 text-green-300 border border-green-900 disabled:opacity-30">
+        Start
+      </button>
+      <button data-action="stop" ${canStop ? '' : 'disabled'}
+        class="btn flex-1 text-xs py-1.5 rounded-md font-medium bg-red-900/60 hover:bg-red-800 text-red-300 border border-red-900 disabled:opacity-30">
+        Stop
+      </button>
+      <button data-action="restart" ${canRestart ? '' : 'disabled'}
+        class="btn text-xs px-2.5 py-1.5 rounded-md font-medium bg-yellow-900/60 hover:bg-yellow-800 text-yellow-300 border border-yellow-900 disabled:opacity-30"
+        title="Restart">↺</button>
+      ${focusBtn}
+      <button data-action="logs"
+        class="btn text-xs px-2.5 py-1.5 rounded-md font-medium bg-surface hover:bg-border text-muted border border-border"
+        title="View logs">≡</button>
+    </div>
+  `;
+}
+
+function updateCard(id) {
+  const card = document.getElementById(`card-${id}`);
+  if (!card) return;
+  const s = services[id];
+  if (s.type === 'worker') return;   // worker cards have no dynamic status to update
+  card.innerHTML = cardHTML(s, TYPE_COLORS[s.type] || TYPE_COLORS.api);
+  wireCardButtons(card, id);
+}
+
+// ─── Worker card ──────────────────────────────────────────────────────────────
+function workerCardHTML(s, tc) {
+  const data       = workerScripts[s.id];
+  const folders    = data ? data.folders : [];
+  const sel        = workerSelections[s.id] || {};
+  const isRunning  = workerRunning[s.id] || false;
+  const hasLast    = !!lastWorkerRun[s.id];
+  const locked     = isRunning ? 'disabled' : '';
+
+  const folderOptions = folders.map(f =>
+    `<option value="${f.name}" ${sel.folder === f.name ? 'selected' : ''}>${f.name}</option>`
+  ).join('');
+
+  const savedFolder   = folders.find(f => f.name === sel.folder);
+  const scriptOptions = savedFolder
+    ? savedFolder.scripts.map(sc =>
+        `<option value="${sc}" ${sel.script === sc ? 'selected' : ''}>${sc}</option>`
+      ).join('')
+    : '';
+
+  const scriptDisabled = (!sel.folder || isRunning) ? 'disabled' : '';
+  const runDisabled    = (!sel.folder || isRunning) ? 'disabled' : '';
+
+  const body = folders.length === 0
+    ? `<div class="text-xs text-gray-600 italic py-1">Loading scripts…</div>`
+    : `<div class="flex flex-col gap-2">
+        <select id="wfolder-${s.id}" ${locked}
+          class="w-full text-xs bg-bg border border-border rounded-md px-2 py-1.5 text-white focus:border-blue-600 focus:outline-none disabled:opacity-40">
+          <option value="">— select folder —</option>
+          ${folderOptions}
+        </select>
+        <select id="wscript-${s.id}" ${scriptDisabled}
+          class="w-full text-xs bg-bg border border-border rounded-md px-2 py-1.5 text-muted focus:border-blue-600 focus:outline-none disabled:opacity-40">
+          <option value="">(run folder directly)</option>
+          ${scriptOptions}
+        </select>
+      </div>`;
+
+  return `
+    <div class="flex items-start justify-between gap-2">
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-sm text-white truncate">${s.name}</p>
+        <p class="text-xs text-muted font-mono truncate">${s.id}</p>
+      </div>
+      <span class="flex-shrink-0 text-xs px-2 py-0.5 rounded-full border font-medium ${tc.bg} ${tc.text} ${tc.border}">${s.type}</span>
+    </div>
+    ${body}
+    <div class="flex gap-1.5 mt-auto">
+      <button data-action="run-worker" ${runDisabled}
+        class="btn flex-1 text-xs py-1.5 rounded-md font-medium bg-green-900/60 hover:bg-green-800 text-green-300 border border-green-900 disabled:opacity-30">
+        ${isRunning ? '● Running' : '▶ Run'}
+      </button>
+      <button data-action="stop-worker" ${isRunning ? '' : 'disabled'}
+        class="btn flex-1 text-xs py-1.5 rounded-md font-medium bg-red-900/60 hover:bg-red-800 text-red-300 border border-red-900 disabled:opacity-30">
+        Stop
+      </button>
+      <button data-action="restart-worker" ${hasLast ? '' : 'disabled'}
+        class="btn text-xs px-2.5 py-1.5 rounded-md font-medium bg-yellow-900/60 hover:bg-yellow-800 text-yellow-300 border border-yellow-900 disabled:opacity-30"
+        title="Restart last run">↺</button>
+      <button data-action="logs"
+        class="btn text-xs px-2.5 py-1.5 rounded-md font-medium bg-surface hover:bg-border text-muted border border-border"
+        title="View logs">≡</button>
+    </div>
+  `;
+}
+
+function wireWorkerCard(card, id) {
+  const data = workerScripts[id];
+
+  const folderSel  = card.querySelector(`#wfolder-${id}`);
+  const scriptSel  = card.querySelector(`#wscript-${id}`);
+  const runBtn     = card.querySelector('[data-action="run-worker"]');
+  const stopBtn    = card.querySelector('[data-action="stop-worker"]');
+  const restartBtn = card.querySelector('[data-action="restart-worker"]');
+  const logsBtn    = card.querySelector('[data-action="logs"]');
+
+  if (logsBtn) logsBtn.addEventListener('click', () => openLogs(id));
+
+  if (!folderSel || !scriptSel || !runBtn || !data) return;
+
+  // Save selection to state so it survives re-renders
+  const saveSelection = () => {
+    workerSelections[id] = { folder: folderSel.value, script: scriptSel.value || '' };
+  };
+
+  const setRunningState = (running) => {
+    workerRunning[id] = running;
+    folderSel.disabled = running;
+    scriptSel.disabled = running || !folderSel.value;
+    runBtn.disabled    = running || !folderSel.value;
+    runBtn.textContent = running ? '● Running' : '▶ Run';
+    if (stopBtn) stopBtn.disabled = !running;
+  };
+
+  folderSel.addEventListener('change', () => {
+    const folder = data.folders.find(f => f.name === folderSel.value);
+    scriptSel.innerHTML = '<option value="">(run folder directly)</option>' +
+      (folder ? folder.scripts.map(sc => `<option value="${sc}">${sc}</option>`).join('') : '');
+    scriptSel.disabled = !folder;
+    runBtn.disabled    = !folderSel.value;
+    saveSelection();
+  });
+
+  scriptSel.addEventListener('change', saveSelection);
+
+  const doRun = (folder, script) => {
+    const termId = script
+      ? `${id}--${folder}--${script.replace(/\.js$/, '')}`
+      : `${id}--${folder}`;
+    wsSend({ type: 'run_worker_script', id, folder, script: script || '' });
+    lastWorkerRun[id]    = { termId, folder, script: script || '' };
+    workerSelections[id] = { folder, script: script || '' };
+    setRunningState(true);
+    if (stopBtn)    stopBtn.disabled    = false;
+    if (restartBtn) restartBtn.disabled = false;
+  };
+
+  runBtn.addEventListener('click', () => {
+    if (!folderSel.value) return;
+    doRun(folderSel.value, scriptSel.value || '');
+  });
+
+  if (stopBtn) {
+    stopBtn.addEventListener('click', () => {
+      const last = lastWorkerRun[id];
+      if (!last) return;
+      wsSend({ type: 'stop_worker', termId: last.termId });
+      setRunningState(false);
+    });
+  }
+
+  if (restartBtn) {
+    restartBtn.addEventListener('click', () => {
+      const last = lastWorkerRun[id];
+      if (!last) return;
+      wsSend({ type: 'stop_worker', termId: last.termId });
+      setRunningState(false);
+      setTimeout(() => doRun(last.folder, last.script), 1000);
+    });
+  }
+}
+
+async function fetchWorkerScripts() {
+  const workers = Object.values(services).filter(s => s.type === 'worker');
+  await Promise.all(workers.map(async (s) => {
+    try {
+      const resp = await fetch(`/api/workers/${s.id}/scripts`);
+      if (resp.ok) workerScripts[s.id] = await resp.json();
+    } catch (_) {}
+  }));
+  // Re-render worker cards now that scripts are loaded
+  Object.values(services).filter(s => s.type === 'worker').forEach(s => {
+    const card = document.getElementById(`card-${s.id}`);
+    if (!card) return;
+    const tc = TYPE_COLORS[s.type] || TYPE_COLORS.api;
+    card.innerHTML = workerCardHTML(s, tc);
+    wireWorkerCard(card, s.id);
+  });
+}
+
+function wireCardButtons(card, id) {
+  card.querySelectorAll('button[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const a = btn.dataset.action;
+      if (a === 'logs')  openLogs(id);
+      else if (a === 'focus') wsSend({ type: 'focus_terminal', id });
+      else wsSend({ type: a, id });
+    });
+  });
+}
+
+// ─── Summary ──────────────────────────────────────────────────────────────────
+function updateSummary() {
+  const all     = Object.values(services);
+  const running = all.filter(s => s.status === 'running').length;
+  const errors  = all.filter(s => s.status === 'error').length;
+  let txt = `${running} / ${all.length} running`;
+  if (errors > 0) txt += ` · ${errors} error${errors > 1 ? 's' : ''}`;
+  document.getElementById('status-summary').textContent = txt;
+  updateGlobalButtons();
+}
+
+function updateGlobalButtons() {
+  const list = activeFilter === 'all'
+    ? Object.values(services)
+    : Object.values(services).filter(s => s.type === activeFilter);
+  // Exclude worker-type services (they have no unified start/stop)
+  const managed = list.filter(s => s.type !== 'worker');
+  const anyStartable = managed.some(s => s.status === 'stopped' || s.status === 'error');
+  const anyStoppable = managed.some(s => s.status === 'running' || s.status === 'starting');
+  document.getElementById('btn-start-all').disabled = !anyStartable;
+  document.getElementById('btn-stop-all').disabled  = !anyStoppable;
+}
+
+function setWsBadge(online) {
+  document.getElementById('ws-badge').innerHTML = online
+    ? `<span class="w-1.5 h-1.5 rounded-full bg-green-400 dot-running"></span> connected`
+    : `<span class="w-1.5 h-1.5 rounded-full bg-red-500"></span> offline`;
+}
+
+function setVSCodeBadge(connected) {
+  const badge = document.getElementById('vscode-badge');
+  badge.classList.toggle('connected', connected);
+  badge.classList.toggle('disconnected', !connected);
+  document.getElementById('vscode-badge-text').textContent =
+    connected ? 'VS Code connected' : 'VS Code disconnected';
+}
+
+// ─── Log panel ────────────────────────────────────────────────────────────────
+function openLogs(id) {
+  if (openLogId && openLogId !== id) wsUnsubscribeLogs(openLogId);
+  openLogId = id;
+  clearLogBody();
+  document.getElementById('log-panel').classList.remove('hidden');
+  updateLogHeader();
+  wsSubscribeLogs(id);
+}
+
+function updateLogHeader() {
+  const s = services[openLogId];
+  if (!s) return;
+  const tc = TYPE_COLORS[s.type] || TYPE_COLORS.api;
+  document.getElementById('log-title').textContent = s.name;
+  const badge = document.getElementById('log-type-badge');
+  badge.className = `text-xs px-2 py-0.5 rounded-full border font-medium ${tc.bg} ${tc.text} ${tc.border}`;
+  badge.textContent = s.type;
+  document.getElementById('log-pid').textContent  = s.pid ? `PID ${s.pid}` : '';
+  const ml = MODE_LABEL[s.mode] || MODE_LABEL.spawn;
+  const modeEl = document.getElementById('log-mode');
+  modeEl.textContent  = ml.text;
+  modeEl.className = `text-xs font-mono ${ml.cls}`;
+
+  const focusBtn = document.getElementById('btn-focus-vscode');
+  focusBtn.classList.toggle('hidden', !(s.mode === 'vscode' || s.mode === 'external'));
+}
+
+function closeLogs() {
+  if (openLogId) wsUnsubscribeLogs(openLogId);
+  openLogId = null;
+  document.getElementById('log-panel').classList.add('hidden');
+}
+
+function clearLogBody() { document.getElementById('log-body').innerHTML = ''; }
+
+function appendLog(text, level, ts) {
+  const body = document.getElementById('log-body');
+  const line = document.createElement('div');
+  line.className = `log-entry log-${level || 'out'}`;
+  const time = new Date(ts).toLocaleTimeString('en-GB', { hour12: false });
+  const safe = text.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  line.innerHTML = `<span class="text-gray-600 select-none">${time} </span>${safe}`;
+  body.appendChild(line);
+  if (document.getElementById('chk-autoscroll')?.checked) body.scrollTop = body.scrollHeight;
+}
+
+// ─── Filters & section switching ─────────────────────────────────────────────
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => {
+      b.classList.remove('active');
+      b.classList.add('text-muted');
+    });
+    btn.classList.add('active');
+    btn.classList.remove('text-muted');
+
+    if (btn.id === 'tab-vpn') {
+      if (activeSection === 'vpn') {
+        // toggle back to services — restore the previously active filter tab
+        switchSection('services');
+        document.querySelectorAll('.tab-btn').forEach(b => { b.classList.remove('active'); b.classList.add('text-muted'); });
+        const prevFilter = document.querySelector(`[data-filter="${activeFilter}"]`);
+        if (prevFilter) { prevFilter.classList.add('active'); prevFilter.classList.remove('text-muted'); }
+        renderAll();
+        updateGlobalButtons();
+      } else {
+        switchSection('vpn');
+      }
+    } else {
+      activeFilter = btn.dataset.filter;
+      if (activeSection !== 'services') switchSection('services');
+      renderAll();
+      updateGlobalButtons();
+    }
+  });
+});
+
+function switchSection(section) {
+  activeSection = section;
+  const isVpn = section === 'vpn';
+  document.getElementById('service-main').classList.toggle('hidden', isVpn);
+  document.getElementById('vpn-panel').classList.toggle('hidden', !isVpn);
+  document.getElementById('btn-start-all').classList.toggle('hidden', isVpn);
+  document.getElementById('btn-stop-all').classList.toggle('hidden', isVpn);
+  if (isVpn) renderVpn();
+}
+
+// ─── Global buttons ───────────────────────────────────────────────────────────
+document.getElementById('btn-start-all').addEventListener('click', () => {
+  const list = Object.values(services);
+  (activeFilter === 'all' ? list : list.filter(s => s.type === activeFilter))
+    .filter(s => s.status === 'stopped' || s.status === 'error')
+    .forEach(s => wsSend({ type: 'start', id: s.id }));
+});
+
+document.getElementById('btn-stop-all').addEventListener('click', () => {
+  if (!confirm('Stop all running services?')) return;
+  const list = Object.values(services);
+  (activeFilter === 'all' ? list : list.filter(s => s.type === activeFilter))
+    .filter(s => s.status === 'running' || s.status === 'starting')
+    .forEach(s => wsSend({ type: 'stop', id: s.id }));
+});
+
+document.getElementById('btn-log-close').addEventListener('click', closeLogs);
+document.getElementById('btn-log-clear').addEventListener('click', clearLogBody);
+document.getElementById('btn-focus-vscode').addEventListener('click', () => {
+  if (openLogId) wsSend({ type: 'focus_terminal', id: openLogId });
+});
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+function formatUptime(ms) {
+  if (!ms) return '';
+  const s = Math.floor(ms / 1000), m = Math.floor(s / 60), h = Math.floor(m / 60), d = Math.floor(h / 24);
+  if (d > 0) return `↑ ${d}d ${h % 24}h`;
+  if (h > 0) return `↑ ${h}h ${m % 60}m`;
+  if (m > 0) return `↑ ${m}m ${s % 60}s`;
+  return `↑ ${s}s`;
+}
+
+// ─── VPN ──────────────────────────────────────────────────────────────────────
+
+function renderVpn() {
+  // Setup banner
+  const banner = document.getElementById('vpn-setup-banner');
+  if (openvpnPath) {
+    banner.classList.add('hidden');
+  } else {
+    banner.classList.remove('hidden');
+    const paths = '/opt/homebrew/sbin/openvpn, /usr/local/sbin/openvpn';
+    document.getElementById('vpn-setup-cmd').textContent =
+      `brew install openvpn && echo "${vpnSetupUser || '$(whoami)'} ALL=(ALL) NOPASSWD: ${paths}" | sudo tee /etc/sudoers.d/ssm-openvpn && sudo chmod 440 /etc/sudoers.d/ssm-openvpn`;
+  }
+
+  const grid = document.getElementById('vpn-grid');
+  grid.innerHTML = '';
+  Object.values(vpnData).forEach(v => {
+    const card = document.createElement('div');
+    card.id = `vpn-card-${v.id}`;
+    card.className = 'vpn-card rounded-xl border border-border bg-surface p-4';
+    card.innerHTML = vpnCardHTML(v);
+    grid.appendChild(card);
+  });
+}
+
+function renderVpnCard(id) {
+  if (activeSection !== 'vpn') return;
+  const card = document.getElementById(`vpn-card-${id}`);
+  if (card && vpnData[id]) card.innerHTML = vpnCardHTML(vpnData[id]);
+}
+
+function vpnCardHTML(v) {
+  const SC = {
+    connected:     { dot: 'bg-green-400 dot-running',   text: 'Connected',       cls: 'text-green-400'  },
+    connecting:    { dot: 'bg-yellow-400 dot-starting',  text: 'Connecting…',    cls: 'text-yellow-400' },
+    disconnecting: { dot: 'bg-yellow-500 dot-stopping',  text: 'Disconnecting…', cls: 'text-yellow-500' },
+    disconnected:  { dot: 'bg-gray-600',                 text: 'Disconnected',    cls: 'text-gray-500'   },
+    error:         { dot: 'bg-red-500',                  text: 'Error',           cls: 'text-red-400'    },
+  };
+  const sc        = SC[v.status] || SC.disconnected;
+  const canAct    = v.status === 'disconnected' || v.status === 'error';
+  const isActive  = v.status === 'connected' || v.status === 'connecting';
+  const logs      = vpnLogs[v.id] || [];
+
+  // Credentials form
+  const credsBlock = !v.hasCredentials ? `
+    <div class="mt-3 p-3 rounded-lg bg-bg border border-border">
+      <p class="text-xs text-muted mb-2">Save credentials to enable connect</p>
+      <div class="flex gap-2 mb-2">
+        <input id="vpn-user-${v.id}" type="text" placeholder="Username"
+          class="flex-1 text-xs bg-surface border border-border rounded-md px-2 py-1.5 text-white placeholder-gray-600 focus:border-blue-600 focus:outline-none">
+        <input id="vpn-pass-${v.id}" type="password" placeholder="Password"
+          class="flex-1 text-xs bg-surface border border-border rounded-md px-2 py-1.5 text-white placeholder-gray-600 focus:border-blue-600 focus:outline-none">
+      </div>
+      <button onclick="saveVpnCreds('${v.id}')"
+        class="btn w-full text-xs py-1.5 rounded-md bg-blue-900/60 hover:bg-blue-800 text-blue-300 border border-blue-900">
+        Save credentials
+      </button>
+    </div>` : '';
+
+  // Edit credentials (collapsible, shown when credentials are saved)
+  const editBlock = v.hasCredentials ? `
+    <div id="vpn-edit-block-${v.id}" class="hidden mt-2 p-3 rounded-lg bg-bg border border-border">
+      <p class="text-xs text-muted mb-2">Update credentials</p>
+      <div class="flex gap-2 mb-2">
+        <input id="vpn-user-${v.id}" type="text" placeholder="New username"
+          class="flex-1 text-xs bg-surface border border-border rounded-md px-2 py-1.5 text-white placeholder-gray-600 focus:border-blue-600 focus:outline-none">
+        <input id="vpn-pass-${v.id}" type="password" placeholder="New password"
+          class="flex-1 text-xs bg-surface border border-border rounded-md px-2 py-1.5 text-white placeholder-gray-600 focus:border-blue-600 focus:outline-none">
+      </div>
+      <button onclick="saveVpnCreds('${v.id}')"
+        class="btn w-full text-xs py-1.5 rounded-md bg-blue-900/60 hover:bg-blue-800 text-blue-300 border border-blue-900">
+        Update
+      </button>
+    </div>` : '';
+
+  // TOTP row (shown when credentials saved, can connect, and TOTP needed)
+  const totpRow = (canAct && v.hasCredentials && v.needsTotp) ? `
+    <div class="flex gap-2 mt-2">
+      <div class="flex-1">
+        <p class="text-xs text-muted mb-1">Google Authenticator code</p>
+        <input id="vpn-totp-${v.id}" type="text" inputmode="numeric" maxlength="8"
+          placeholder="6-digit code"
+          class="w-full text-xs bg-bg border border-border rounded-md px-3 py-2 text-white placeholder-gray-600 focus:border-blue-600 focus:outline-none font-mono tracking-widest">
+      </div>
+      <button onclick="vpnConnect('${v.id}', true)"
+        class="btn self-end text-xs px-4 py-2 rounded-md bg-green-900/60 hover:bg-green-800 text-green-300 border border-green-900">
+        Connect
+      </button>
+    </div>` : '';
+
+  // Direct connect (no TOTP needed)
+  const connectBtn = (canAct && v.hasCredentials && !v.needsTotp) ? `
+    <button onclick="vpnConnect('${v.id}', false)"
+      class="btn flex-1 text-xs py-1.5 rounded-md bg-green-900/60 hover:bg-green-800 text-green-300 border border-green-900">
+      Connect
+    </button>` : '';
+
+  // Disconnect
+  const disconnectBtn = isActive ? `
+    <button onclick="vpnDisconnect('${v.id}')"
+      class="btn flex-1 text-xs py-1.5 rounded-md bg-red-900/60 hover:bg-red-800 text-red-300 border border-red-900">
+      Disconnect
+    </button>` : '';
+
+  // Edit credentials toggle button (placed in card header)
+  const editBtn = v.hasCredentials ? `
+    <button onclick="document.getElementById('vpn-edit-block-${v.id}').classList.toggle('hidden')"
+      class="btn text-xs px-2 py-1 rounded bg-surface hover:bg-border text-muted border border-border"
+      title="Edit saved credentials">⚙</button>` : '';
+
+  // Session token indicator
+  const sessionPill = (v.status === 'connected' && !v.needsTotp)
+    ? `<span class="text-xs px-1.5 py-0.5 rounded border border-green-900 bg-green-900/20 text-green-600 font-mono">session active</span>`
+    : (v.status !== 'connected' && !v.needsTotp && v.hasCredentials)
+    ? `<span class="text-xs text-green-800 font-mono" title="Cached session — next connect skips TOTP">token cached</span>`
+    : '';
+
+  // Recent logs
+  const logLines = logs.slice(-8).map(l => {
+    const t = new Date(l.ts).toLocaleTimeString('en-GB', { hour12: false });
+    return `<div class="log-entry log-${l.level}"><span class="text-gray-700">${t} </span>${escHtml(l.text)}</div>`;
+  }).join('');
+  const logsBlock = logLines ? `
+    <div class="mt-3 pt-3 border-t border-border/40">
+      <div id="vpn-logbox-${v.id}" class="space-y-px max-h-32 overflow-y-auto">${logLines}</div>
+    </div>` : '';
+
+  // Main buttons row (editBtn is in the header, not here)
+  const mainBtns = (connectBtn || disconnectBtn) ? `
+    <div class="flex gap-1.5 mt-3">
+      ${connectBtn}${disconnectBtn}
+    </div>` : '';
+
+  return `
+    <div class="flex items-start justify-between gap-2 mb-3">
+      <div class="flex-1 min-w-0">
+        <p class="font-semibold text-sm text-white">${v.name}</p>
+        <p class="text-xs text-muted font-mono truncate" title="${escHtml(v.configFile)}">${v.configFile.split('/').pop()}</p>
+      </div>
+      <div class="flex items-center gap-1.5 flex-shrink-0">
+        ${editBtn}
+        <span class="text-xs px-2 py-0.5 rounded-full border font-medium bg-indigo-900/40 text-indigo-300 border-indigo-800">vpn</span>
+      </div>
+    </div>
+
+    <div class="flex items-center gap-2 flex-wrap">
+      <span class="w-2 h-2 rounded-full flex-shrink-0 ${sc.dot}"></span>
+      <span class="${sc.cls} font-medium text-xs">${sc.text}</span>
+      ${sessionPill}
+    </div>
+
+    ${credsBlock}
+    ${editBlock}
+    ${totpRow}
+    ${mainBtns}
+    ${logsBlock}
+  `;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+async function vpnConnect(id, withTotp) {
+  const v = vpnData[id];
+  if (!v) return;
+  let totp = '';
+  if (withTotp) {
+    const inp = document.getElementById(`vpn-totp-${id}`);
+    totp = inp ? inp.value.trim() : '';
+    if (!totp) { inp?.focus(); return; }
+  }
+  const res = await fetch('/api/vpn/connect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, totp }),
+  });
+  const data = await res.json();
+  if (data.error === 'openvpn_not_installed') {
+    document.getElementById('vpn-setup-banner')?.classList.remove('hidden');
+  }
+}
+
+function vpnDisconnect(id) {
+  fetch('/api/vpn/disconnect', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id }),
+  });
+}
+
+async function saveVpnCreds(id) {
+  const username = document.getElementById(`vpn-user-${id}`)?.value.trim();
+  const password = document.getElementById(`vpn-pass-${id}`)?.value;
+  if (!username || !password) { alert('Enter both username and password'); return; }
+  const res = await fetch('/api/vpn/credentials', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ id, username, password }),
+  });
+  const data = await res.json();
+  if (data.ok) {
+    if (vpnData[id]) { vpnData[id].hasCredentials = true; renderVpnCard(id); }
+  }
+}
+
+function appendVpnLog(id, entry) {
+  const box = document.getElementById(`vpn-logbox-${id}`);
+  if (!box) return;
+  const div = document.createElement('div');
+  div.className = `log-entry log-${entry.level}`;
+  const t = new Date(entry.ts).toLocaleTimeString('en-GB', { hour12: false });
+  div.innerHTML = `<span class="text-gray-700">${t} </span>${escHtml(entry.text)}`;
+  box.appendChild(div);
+  while (box.children.length > 12) box.firstChild.remove();
+  box.scrollTop = box.scrollHeight;
+}
+
+function copySetupCmd() {
+  const cmd = document.getElementById('vpn-setup-cmd')?.textContent;
+  if (cmd) navigator.clipboard.writeText(cmd).catch(() => {}).then(() => {
+    const btn = document.querySelector('#vpn-setup-banner button');
+    if (btn) { const orig = btn.textContent; btn.textContent = 'Copied!'; setTimeout(() => btn.textContent = orig, 1800); }
+  });
+}
+
+// Wire Enter key for TOTP inputs
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && e.target.id?.startsWith('vpn-totp-')) {
+    vpnConnect(e.target.id.replace('vpn-totp-', ''), true);
+  }
+});
+
+// ─── Boot ─────────────────────────────────────────────────────────────────────
+connect();
+</script>
+</body>
+</html>

@@ -1,0 +1,4 @@
+node_modules/
+vpn.config.json
+*.tmp
+.DS_Store

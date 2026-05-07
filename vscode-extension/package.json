@@ -1,0 +1,18 @@
+{
+  "name": "service-manager",
+  "displayName": "Service Manager Bridge",
+  "description": "Opens VS Code terminal tabs from the Service Manager dashboard",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": { "vscode": "^1.70.0" },
+  "activationEvents": ["onStartupFinished"],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "sm.openServiceTerminal",
+        "title": "Service Manager: Open Terminal"
+      }
+    ]
+  }
+}

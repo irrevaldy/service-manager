@@ -1,0 +1,18 @@
+{
+  "environments": [
+    {
+      "id": "uat",
+      "name": "UAT",
+      "configFile": "/path/to/uat.ovpn",
+      "username": "",
+      "password": ""
+    },
+    {
+      "id": "prod",
+      "name": "Production",
+      "configFile": "/path/to/prod.ovpn",
+      "username": "",
+      "password": ""
+    }
+  ]
+}
