@@ -27,8 +27,6 @@ function inferCmd(scripts) {
 }
 
 // ── Port detection (vite config → script --port flag) ──────────────────────────
-// Skips .env PORT= — commonly a shared template value and unreliable.
-// Set the real port in vite.config, the npm script, or .ssm.json.
 function inferPort(dir, scripts) {
   // 1. vite.config.js / vite.config.ts server.port
   for (const name of ['vite.config.js', 'vite.config.ts']) {
@@ -46,17 +44,6 @@ function inferPort(dir, scripts) {
   }
 
   return null;
-}
-
-// ── Per-project overrides via .ssm.json ────────────────────────────────────────
-// Place a .ssm.json in a project folder to override any auto-detected value.
-// Example:  { "port": 3001, "name": "Soco Public API" }
-// Supported keys: port, name, type, cmd, args, note
-function loadOverrides(dir) {
-  const file = path.join(dir, '.ssm.json');
-  if (!fs.existsSync(file)) return {};
-  try { return JSON.parse(fs.readFileSync(file, 'utf8')); }
-  catch (_) { return {}; }
 }
 
 // ── Human-readable name ────────────────────────────────────────────────────────
@@ -94,34 +81,24 @@ function discover() {
       try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')); }
       catch (_) { return null; }
 
-      const overrides = loadOverrides(dir);
-      const type      = overrides.type || inferType(id);
-      const isWorker  = type === 'worker';
+      const type     = inferType(id);
+      const isWorker = type === 'worker';
 
-      const { cmd, args } = isWorker
-        ? { cmd: null, args: [] }
-        : (() => {
-            if (overrides.cmd) return { cmd: overrides.cmd, args: overrides.args || [] };
-            return inferCmd(pkg.scripts);
-          })();
+      const { cmd, args } = isWorker ? { cmd: null, args: [] } : inferCmd(pkg.scripts);
 
-      // Skip library/utility packages with no runnable command and no override
+      // Skip library/utility packages with no runnable command
       if (!isWorker && !cmd) return null;
 
-      const port = isWorker ? null : (overrides.port ?? inferPort(dir, pkg.scripts));
+      const port = isWorker ? null : inferPort(dir, pkg.scripts);
 
       return {
         id,
-        name: overrides.name || formatName(id, pkg),
+        name: formatName(id, pkg),
         type,
         port,
         cmd,
         args,
-        ...(overrides.note != null
-          ? { note: overrides.note }
-          : isWorker
-            ? { note: 'No unified entry point — launch individual worker scripts manually.' }
-            : {}),
+        ...(isWorker ? { note: 'No unified entry point — launch individual worker scripts manually.' } : {}),
       };
     })
     .filter(Boolean)
@@ -145,33 +122,23 @@ function discoverOne(id) {
   try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')); }
   catch (_) { return null; }
 
-  const overrides = loadOverrides(dir);
-  const type      = overrides.type || inferType(id);
-  const isWorker  = type === 'worker';
+  const type     = inferType(id);
+  const isWorker = type === 'worker';
 
-  const { cmd, args } = isWorker
-    ? { cmd: null, args: [] }
-    : (() => {
-        if (overrides.cmd) return { cmd: overrides.cmd, args: overrides.args || [] };
-        return inferCmd(pkg.scripts);
-      })();
+  const { cmd, args } = isWorker ? { cmd: null, args: [] } : inferCmd(pkg.scripts);
 
   if (!isWorker && !cmd) return null;
 
-  const port = isWorker ? null : (overrides.port ?? inferPort(dir, pkg.scripts));
+  const port = isWorker ? null : inferPort(dir, pkg.scripts);
 
   return {
     id,
-    name: overrides.name || formatName(id, pkg),
+    name: formatName(id, pkg),
     type,
     port,
     cmd,
     args,
-    ...(overrides.note != null
-      ? { note: overrides.note }
-      : isWorker
-        ? { note: 'No unified entry point — launch individual worker scripts manually.' }
-        : {}),
+    ...(isWorker ? { note: 'No unified entry point — launch individual worker scripts manually.' } : {}),
   };
 }
 

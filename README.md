@@ -279,19 +279,6 @@ Services are **auto-discovered** from sibling directories at startup. Any folder
 
 1. `vite.config.js` / `vite.config.ts` → `server.port`
 2. `--port` flag in any `package.json` script
-3. `.ssm.json` override file (see below)
-
-### Per-project overrides (`.ssm.json`)
-
-Place a `.ssm.json` file in any project folder to override auto-detected values:
-
-```json
-{ "port": 3001, "name": "My Service", "type": "api" }
-```
-
-Supported keys: `port`, `name`, `type`, `cmd`, `args`, `note`
-
-Use `.ssm.json` to set ports for services that don't use Vite and don't have a `--port` flag in their npm scripts.
 
 ### Service object shape
 
@@ -419,18 +406,6 @@ Runs every **4 seconds** and checks each service's configured port with a 1.2-se
 
 Services are discovered automatically — just create a sibling directory with a `package.json` containing a `dev`, `serve`, or `start` script. No changes to `service-manager` are needed.
 
-To customize a service's name, port, type, or start command without changing its `package.json`, add a `.ssm.json` file to its root:
-
-```json
-{
-  "port": 3200,
-  "name": "My Custom Name",
-  "type": "api",
-  "cmd": "npm",
-  "args": ["run", "start:local"]
-}
-```
-
 The service manager must be **restarted** (`node server.js`) for discovery changes to take effect.
 
 ---
@@ -451,7 +426,7 @@ SSM has a 60-second watchdog on the `starting` state. If the service never confi
 
 Common causes:
 - **Service binds to IPv6 only (Vite on macOS)** — add `host: '0.0.0.0'` to `server` in `vite.config.js` so the TCP health check can reach it on `127.0.0.1`.
-- **Wrong port configured** — verify the port in `.ssm.json` or `vite.config.js` matches what the service actually listens on.
+- **Wrong port configured** — verify the port in `vite.config.js` or the `--port` flag in `package.json` matches what the service actually listens on.
 - **TypeScript compilation error** — check the VS Code terminal for compile errors.
 
 ### Service stuck in "Stopping"
