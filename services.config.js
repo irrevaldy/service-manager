@@ -133,4 +133,46 @@ function discover() {
 
 const SERVICES = discover();
 
-module.exports = { SERVICES, PROJECTS_DIR };
+// Discover a single directory by name — used for hot-adding newly cloned repos.
+function discoverOne(id) {
+  if (SKIP.has(id) || id.startsWith('.')) return null;
+  const dir = path.join(PROJECTS_DIR, id);
+
+  const pkgFile = path.join(dir, 'package.json');
+  if (!fs.existsSync(pkgFile)) return null;
+
+  let pkg;
+  try { pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8')); }
+  catch (_) { return null; }
+
+  const overrides = loadOverrides(dir);
+  const type      = overrides.type || inferType(id);
+  const isWorker  = type === 'worker';
+
+  const { cmd, args } = isWorker
+    ? { cmd: null, args: [] }
+    : (() => {
+        if (overrides.cmd) return { cmd: overrides.cmd, args: overrides.args || [] };
+        return inferCmd(pkg.scripts);
+      })();
+
+  if (!isWorker && !cmd) return null;
+
+  const port = isWorker ? null : (overrides.port ?? inferPort(dir, pkg.scripts));
+
+  return {
+    id,
+    name: overrides.name || formatName(id, pkg),
+    type,
+    port,
+    cmd,
+    args,
+    ...(overrides.note != null
+      ? { note: overrides.note }
+      : isWorker
+        ? { note: 'No unified entry point — launch individual worker scripts manually.' }
+        : {}),
+  };
+}
+
+module.exports = { SERVICES, PROJECTS_DIR, discoverOne };

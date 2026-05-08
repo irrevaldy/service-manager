@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Service Manager</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg">
   <script src="https://cdn.tailwindcss.com"></script>
   <script>
     tailwind.config = {
@@ -274,6 +275,14 @@ function connect() {
           updateCard(msg.id);
           updateSummary();
           if (openLogId === msg.id) updateLogHeader();
+        }
+        break;
+
+      case 'service_added':
+        if (!services[msg.data.id]) {
+          services[msg.data.id] = msg.data;
+          renderAll();
+          updateSummary();
         }
         break;
 

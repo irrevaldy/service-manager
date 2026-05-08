@@ -6,7 +6,7 @@ const { WebSocketServer } = require('ws');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { SERVICES, PROJECTS_DIR } = require('./services.config');
+const { SERVICES, PROJECTS_DIR, discoverOne } = require('./services.config');
 const ProcessManager = require('./process-manager');
 const VpnManager = require('./vpn-manager');
 
@@ -98,6 +98,25 @@ app.get('/api/workers/:id/scripts', (req, res) => {
 
 // ── WebSocket ─────────────────────────────────────────────────────────────────
 pm.on('status', (id, data) => broadcast({ type: 'status', id, data }));
+pm.on('service_added', (data) => broadcast({ type: 'service_added', data }));
+
+// ── Hot-add newly cloned repos ────────────────────────────────────────────────
+// Debounce per directory name — git clone creates many events before package.json
+// is fully written, so we wait 3s after the last event for that name.
+const _pendingAdds = {};
+fs.watch(PROJECTS_DIR, (eventType, filename) => {
+  if (!filename || pm.hasService(filename)) return;
+  clearTimeout(_pendingAdds[filename]);
+  _pendingAdds[filename] = setTimeout(() => {
+    delete _pendingAdds[filename];
+    if (pm.hasService(filename)) return;
+    const cfg = discoverOne(filename);
+    if (cfg) {
+      pm.addService(cfg);
+      console.log(`  + auto-detected new service: ${filename}`);
+    }
+  }, 3000);
+});
 
 vm.on('status',     (id, data)  => broadcast({ type: 'vpn_status',     id, data }));
 vm.on('log',        (id, entry) => broadcast({ type: 'vpn_log',        id, entry }));

@@ -183,6 +183,34 @@ class ProcessManager extends EventEmitter {
     Object.values(this._logSubs).forEach(set => set.delete(ws));
   }
 
+  hasService(id) {
+    return !!this._services[id];
+  }
+
+  addService(cfg) {
+    if (this._services[cfg.id]) return false;
+    this._services[cfg.id] = {
+      id: cfg.id,
+      name: cfg.name,
+      type: cfg.type,
+      port: cfg.port,
+      cmd: cfg.cmd,
+      args: cfg.args,
+      note: cfg.note || null,
+      status: 'stopped',
+      pid: null,
+      proc: null,
+      startTime: null,
+      exitCode: null,
+      errorMsg: null,
+      mode: 'spawn',
+    };
+    this._logSubs[cfg.id] = new Set();
+    this._logBuf[cfg.id]  = [];
+    this.emit('service_added', this._pub(this._services[cfg.id]));
+    return true;
+  }
+
   stopAll() {
     Object.keys(this._services).forEach(id => {
       const s = this._services[id];
