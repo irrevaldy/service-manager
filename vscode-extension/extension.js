@@ -93,8 +93,6 @@ function handleRequest(req, res) {
       const { id, name, cwd, cmd } = data;
       if (!id || !cwd) return json(res, 400, { error: 'id and cwd required' });
 
-      const termName = name || id;
-
       // 1. Check our managed map first (fastest path)
       const existing = managed.get(id);
       if (existing && vscode.window.terminals.includes(existing.terminal)) {
@@ -103,18 +101,22 @@ function handleRequest(req, res) {
         return json(res, 200, { ok: true, reused: true });
       }
 
-      // 2. Search all open VS Code terminals by name — catches the case where SSM
-      //    restarted and the managed map was reset but the tab is still open.
-      const byName = vscode.window.terminals.find(t => t.name === termName);
-      if (byName) {
-        managed.set(id, { terminal: byName, logBuffer: [], flushTimer: null });
-        byName.show(false);
-        if (cmd) { await delay(300); byName.sendText(cmd, true); }
+      // 2. Search open terminals by cwd — catches the case where SSM restarted
+      //    and the managed map was reset but the tab is still open.
+      const byCwd = vscode.window.terminals.find(t => {
+        const tc = t.creationOptions?.cwd;
+        return (typeof tc === 'string' ? tc : tc?.fsPath) === cwd;
+      });
+      if (byCwd) {
+        managed.set(id, { terminal: byCwd, logBuffer: [], flushTimer: null });
+        byCwd.show(false);
+        if (cmd) { await delay(300); byCwd.sendText(cmd, true); }
         return json(res, 200, { ok: true, reused: true });
       }
 
-      // 3. Nothing found — create a fresh terminal
-      const terminal = vscode.window.createTerminal({ name: termName, cwd });
+      // 3. Nothing found — create a fresh terminal without an explicit name so
+      //    VS Code shows the default "zsh <folder>" format in the tab.
+      const terminal = vscode.window.createTerminal({ cwd });
       managed.set(id, { terminal, logBuffer: [], flushTimer: null });
       terminal.show(false);
       if (cmd) { await delay(700); terminal.sendText(cmd, true); }
