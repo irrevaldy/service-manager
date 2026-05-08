@@ -140,9 +140,13 @@ class ProcessManager extends EventEmitter {
       case 'cmd_started':
         this._setStatus(id, 'starting');
         this._addLog(id, `$ ${event.cmd || ''}`, 'sys');
+        // No-port services can't be detected via port polling — the starting
+        // timer will transition to 'running' after the grace period.
         break;
 
       case 'cmd_ended':
+        // For no-port services the process exiting IS the definitive signal.
+        // For port-based services the port poller will pick up the disappearance.
         if (event.exitCode === 0 || event.exitCode == null) {
           this._setStatus(id, 'stopped');
         } else {
@@ -506,11 +510,23 @@ class ProcessManager extends EventEmitter {
     this.emit('status', id, this._pub(svc));
   }
 
-  // If a service stays in 'starting' for more than 60s, transition to 'error'
+  // If a service stays in 'starting' for more than 60s, transition to 'error'.
+  // Exception: no-port services can't be detected via port polling, so assume
+  // they're running after a short grace period instead of timing out.
   _armStartingTimer(id) {
     if (this._startingTimers[id]) clearTimeout(this._startingTimers[id]);
+    const svc = this._services[id];
+    if (svc && !svc.port) {
+      // Give 10s for the process to crash; if still starting, assume it's running
+      this._startingTimers[id] = setTimeout(() => {
+        if (svc.status === 'starting') {
+          this._setStatus(id, 'running');
+          this._addLog(id, 'No port configured — assumed running.', 'sys');
+        }
+      }, 10000);
+      return;
+    }
     this._startingTimers[id] = setTimeout(() => {
-      const svc = this._services[id];
       if (svc && svc.status === 'starting') {
         this._addLog(id, 'Service did not start within 60s — check logs in VS Code terminal.', 'err');
         this._setStatus(id, 'error', { errorMsg: 'Start timed out after 60s' });

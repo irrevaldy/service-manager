@@ -24,14 +24,15 @@ class VpnManager extends EventEmitter {
 
     let portIdx = 0;
     for (const env of this._config.environments || []) {
+      const savedToken = env.authToken || null;
       this._conns[env.id] = {
         status: 'disconnected',
         proc: null,
         mgmtSocket: null,
         mgmtPort: MGMT_BASE_PORT + portIdx++,
         mgmtBuf: '',
-        authToken: null,
-        needsTotp: true,  // cleared once we successfully connect and get a token
+        authToken: savedToken,
+        needsTotp: !savedToken,  // no TOTP needed if we have a cached session token
         logs: [],
       };
     }
@@ -86,20 +87,24 @@ class VpnManager extends EventEmitter {
     if (!fs.existsSync(env.configFile))
       return { error: `Config file not found: ${env.configFile}` };
 
-    // Build the password line: use cached auth-token when reconnecting without TOTP.
-    // This server expects password+TOTP concatenated (no challenge-response).
+    // Build the password line.
+    // totpMode "concat"    (default): password+TOTP sent together in the auth file.
+    // totpMode "challenge"          : only password in auth file; TOTP is sent via
+    //                                 CR_TEXT challenge-response once the server asks.
+    const challengeMode = env.totpMode === 'challenge';
     let passwordLine;
     conn.pendingTotp = totp || null;
     if (conn.authToken && !totp) {
       passwordLine = conn.authToken;
       this._log(id, 'Reconnecting with cached session token (no TOTP needed)…', 'sys');
-    } else if (totp) {
+    } else if (totp && !challengeMode) {
       passwordLine = env.password + totp;
       conn.authToken = null;
-      this._log(id, 'Connecting with password + TOTP…', 'sys');
+      this._log(id, 'Connecting with password + TOTP (concat)…', 'sys');
     } else {
       passwordLine = env.password;
-      this._log(id, 'Connecting…', 'sys');
+      conn.authToken = null;
+      this._log(id, totp ? 'Connecting — TOTP will be sent via challenge-response…' : 'Connecting…', 'sys');
     }
 
     // Write temp credentials file (chmod 600 — openvpn requires it)
@@ -344,6 +349,7 @@ class VpnManager extends EventEmitter {
     if (tokenMatch) {
       conn.authToken = tokenMatch[1];
       conn.needsTotp = false;
+      this._persistToken(id, tokenMatch[1]);
       this._log(id, '✓ Session token cached — reconnects will not need TOTP', 'sys');
       return;
     }
@@ -361,6 +367,7 @@ class VpnManager extends EventEmitter {
     if (/AUTH_FAILED|AUTH: Received AUTH_FAILED|auth-failure/.test(line)) {
       conn.authToken = null;
       conn.needsTotp = true;
+      this._persistToken(id, null);
       this._setStatus(id, 'error');
       this._log(id, 'Authentication failed — enter TOTP and reconnect.', 'err');
       this.emit('auth_failed', id);
@@ -381,6 +388,14 @@ class VpnManager extends EventEmitter {
     if (/warn|WARNING/i.test(line)) return 'warn';
     if (/Initialization Sequence Completed|VPN connected|Session token/.test(line)) return 'sys';
     return 'out';
+  }
+
+  _persistToken(id, token) {
+    const env = this._config.environments.find(e => e.id === id);
+    if (!env) return;
+    if (token) env.authToken = token;
+    else delete env.authToken;
+    this._saveConfig();
   }
 
   _setStatus(id, status) {
