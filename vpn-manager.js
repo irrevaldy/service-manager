@@ -24,15 +24,14 @@ class VpnManager extends EventEmitter {
 
     let portIdx = 0;
     for (const env of this._config.environments || []) {
-      const savedToken = env.authToken || null;
       this._conns[env.id] = {
         status: 'disconnected',
         proc: null,
         mgmtSocket: null,
         mgmtPort: MGMT_BASE_PORT + portIdx++,
         mgmtBuf: '',
-        authToken: savedToken,
-        needsTotp: !savedToken,  // no TOTP needed if we have a cached session token
+        authToken: null,
+        needsTotp: true,
         logs: [],
       };
     }
@@ -345,11 +344,12 @@ class VpnManager extends EventEmitter {
     if (!conn) return;
 
     // Capture auth-token from server push so we can reconnect without TOTP
+    // (kept in memory only — not persisted to disk, since the token is tied to
+    //  the current TLS session and will be invalid after a laptop sleep/reboot)
     const tokenMatch = line.match(/auth-token[= ](\S+)/i);
     if (tokenMatch) {
       conn.authToken = tokenMatch[1];
       conn.needsTotp = false;
-      this._persistToken(id, tokenMatch[1]);
       this._log(id, '✓ Session token cached — reconnects will not need TOTP', 'sys');
       return;
     }
@@ -367,7 +367,6 @@ class VpnManager extends EventEmitter {
     if (/AUTH_FAILED|AUTH: Received AUTH_FAILED|auth-failure/.test(line)) {
       conn.authToken = null;
       conn.needsTotp = true;
-      this._persistToken(id, null);
       this._setStatus(id, 'error');
       this._log(id, 'Authentication failed — enter TOTP and reconnect.', 'err');
       this.emit('auth_failed', id);
@@ -388,14 +387,6 @@ class VpnManager extends EventEmitter {
     if (/warn|WARNING/i.test(line)) return 'warn';
     if (/Initialization Sequence Completed|VPN connected|Session token/.test(line)) return 'sys';
     return 'out';
-  }
-
-  _persistToken(id, token) {
-    const env = this._config.environments.find(e => e.id === id);
-    if (!env) return;
-    if (token) env.authToken = token;
-    else delete env.authToken;
-    this._saveConfig();
   }
 
   _setStatus(id, status) {
