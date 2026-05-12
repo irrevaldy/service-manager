@@ -77,7 +77,7 @@ class ProcessManager extends EventEmitter {
       if (available) {
         this._startVSCode(id);
       } else {
-        this._startSpawn(id);
+        this._launchVSCodeAndStart(id);
       }
     });
   }
@@ -219,6 +219,63 @@ class ProcessManager extends EventEmitter {
   }
 
   // ── VS Code mode ────────────────────────────────────────────────────────────
+
+  _launchVSCodeAndStart(id) {
+    const { exec } = require('child_process');
+    const workspaceFile = path.join(this._projectsDir, 'sociolla.code-workspace');
+    const target = fs.existsSync(workspaceFile) ? `"${workspaceFile}"` : '';
+
+    this._setStatus(id, 'starting', { mode: 'vscode' });
+    this._addLog(id, 'VS Code not connected — launching VS Code…', 'sys');
+
+    let resolved = false;
+    let pollTimer = null;
+
+    const succeed = () => {
+      if (resolved) return;
+      resolved = true;
+      clearInterval(pollTimer);
+      this._addLog(id, 'VS Code connected — starting service in terminal.', 'sys');
+      this._startVSCode(id);
+    };
+
+    const fallback = () => {
+      if (resolved) return;
+      resolved = true;
+      clearInterval(pollTimer);
+      this._addLog(id, 'VS Code did not connect — falling back to spawn mode.', 'warn');
+      this._startSpawn(id);
+    };
+
+    exec(`code ${target}`, (err) => {
+      if (err) {
+        exec(`open -a "Visual Studio Code" ${target || '.'}`, (err2) => {
+          if (err2) {
+            this._addLog(id, 'Could not launch VS Code.', 'warn');
+            fallback();
+          }
+        });
+      }
+    });
+
+    // Poll for VSCode bridge connection (max 20s)
+    let attempts = 0;
+    const maxAttempts = 40; // 40 × 500ms = 20s
+    pollTimer = setInterval(() => {
+      if (resolved) { clearInterval(pollTimer); return; }
+      const svc = this._services[id];
+      if (!svc || svc.status !== 'starting') { resolved = true; clearInterval(pollTimer); return; }
+      attempts++;
+      this._liveProbeVSCode().then(available => {
+        if (available) {
+          succeed();
+        } else if (attempts >= maxAttempts) {
+          this._addLog(id, 'VS Code did not connect within 20s.', 'warn');
+          fallback();
+        }
+      });
+    }, 500);
+  }
 
   _startVSCode(id) {
     const svc = this._services[id];

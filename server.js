@@ -12,7 +12,7 @@ const VpnManager = require('./vpn-manager');
 
 const PORT = 9999;
 
-function startServer({ vpnConfigPath, onListening } = {}) {
+function startServer({ vpnConfigPath, onListening, onPortConflict } = {}) {
   const _vpnConfigPath = vpnConfigPath || path.join(__dirname, 'vpn.config.json');
 
   const app = express();
@@ -176,6 +176,16 @@ function startServer({ vpnConfigPath, onListening } = {}) {
       if (client.readyState === 1) { try { client.send(json); } catch (_) {} }
     });
   }
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.error(`\n  [ERROR] Port ${PORT} is already in use.`);
+      console.error(`  Another instance is running — stop it first (Ctrl+C), then reopen the app.\n`);
+      if (onPortConflict) onPortConflict();
+    } else {
+      throw err;
+    }
+  });
 
   server.listen(PORT, () => {
     console.log(`\n  Service Manager`);

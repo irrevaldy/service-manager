@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, shell } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -131,6 +131,26 @@ function buildMenu() {
 
 // ── App lifecycle ─────────────────────────────────────────────────────────────
 
+function showPortConflictDialog() {
+  dialog.showMessageBox({
+    type: 'warning',
+    title: 'Service Manager Already Running',
+    message: 'Service Manager is already running in a terminal.',
+    detail: 'Please stop the terminal process first by pressing Ctrl+C where "node server.js" is running, then reopen the app.',
+    buttons: ['OK'],
+  }).then(() => app.quit()).catch(() => app.quit());
+}
+
+// Catch EADDRINUSE before Electron shows its crash dialog
+process.on('uncaughtException', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    showPortConflictDialog();
+  } else {
+    dialog.showErrorBox('Unexpected Error', err.stack || err.message || String(err));
+    app.quit();
+  }
+});
+
 app.whenReady().then(() => {
   const userDataDir = getUserDataDir();
   const appConfig = loadAppConfig(userDataDir);
@@ -148,7 +168,11 @@ app.whenReady().then(() => {
   buildMenu();
 
   const { startServer } = require('../server');
-  const { shutdown } = startServer({ vpnConfigPath, onListening: createWindow });
+  const { shutdown } = startServer({
+    vpnConfigPath,
+    onListening: createWindow,
+    onPortConflict: showPortConflictDialog,
+  });
   serverShutdown = shutdown;
 });
 
