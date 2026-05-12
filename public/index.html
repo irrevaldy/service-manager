@@ -185,6 +185,9 @@
 
 
 <script>
+if (navigator.userAgent.includes('Electron')) document.body.classList.add('is-electron');
+</script>
+<script>
 // ─── State ────────────────────────────────────────────────────────────────────
 const TYPE_COLORS = {
   api:       { bg:'bg-blue-900/40',   text:'text-blue-300',   border:'border-blue-800' },

@@ -3,7 +3,7 @@
 const path = require('path');
 const fs   = require('fs');
 
-const PROJECTS_DIR = path.resolve(__dirname, '..');
+const PROJECTS_DIR = process.env.SSM_PROJECTS_DIR || path.resolve(__dirname, '..');
 
 // Directories to never treat as services
 const SKIP = new Set(['service-manager', 'node_modules', '.git', '.github']);

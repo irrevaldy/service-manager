@@ -28,6 +28,7 @@ class VpnManager extends EventEmitter {
         status: 'disconnected',
         proc: null,
         mgmtSocket: null,
+        mgmtServer: null,
         mgmtPort: MGMT_BASE_PORT + portIdx++,
         mgmtBuf: '',
         authToken: null,
@@ -86,90 +87,102 @@ class VpnManager extends EventEmitter {
     if (!fs.existsSync(env.configFile))
       return { error: `Config file not found: ${env.configFile}` };
 
-    // Build the password line.
-    // totpMode "concat"    (default): password+TOTP sent together in the auth file.
-    // totpMode "challenge"          : only password in auth file; TOTP is sent via
-    //                                 CR_TEXT challenge-response once the server asks.
-    const challengeMode = env.totpMode === 'challenge';
-    let passwordLine;
     conn.pendingTotp = totp || null;
     if (conn.authToken && !totp) {
-      passwordLine = conn.authToken;
       this._log(id, 'Reconnecting with cached session token (no TOTP needed)…', 'sys');
-    } else if (totp && !challengeMode) {
-      passwordLine = env.password + totp;
-      conn.authToken = null;
-      this._log(id, 'Connecting with password + TOTP (concat)…', 'sys');
     } else {
-      passwordLine = env.password;
       conn.authToken = null;
-      this._log(id, totp ? 'Connecting — TOTP will be sent via challenge-response…' : 'Connecting…', 'sys');
-    }
-
-    // Write temp credentials file (chmod 600 — openvpn requires it)
-    const tmpFile = path.join(os.tmpdir(), `ssm-vpn-${id}-${Date.now()}.tmp`);
-    try {
-      fs.writeFileSync(tmpFile, `${env.username}\n${passwordLine}\n`, { mode: 0o600 });
-    } catch (err) {
-      return { error: err.message };
+      this._log(id, totp ? 'Connecting — TOTP will be sent via static challenge…' : 'Connecting…', 'sys');
     }
 
     this._setStatus(id, 'connecting');
 
-    const proc = spawn('sudo', [
-      '-n', bin,
-      '--config', env.configFile,
-      '--auth-user-pass', tmpFile,
-      '--management', '127.0.0.1', String(conn.mgmtPort),
-      '--management-hold',    // hold before connecting so mgmt socket is ready for CR_TEXT
-      '--auth-retry', 'none', // exit on auth failure instead of retrying with stale TOTP
-    ], { stdio: ['ignore', 'pipe', 'pipe'] });
+    // Start a TCP server BEFORE spawning OpenVPN so it connects to us immediately
+    // (--management-client mode). This eliminates the race where --management-hold
+    // times out before we connect in client mode.
+    if (conn.mgmtServer) { try { conn.mgmtServer.close(); } catch (_) {} conn.mgmtServer = null; }
 
-    conn.proc = proc;
-    conn.tmpFile = tmpFile; // cleaned up on process exit
+    const mgmtServer = net.createServer(sock => {
+      mgmtServer.close();
+      conn.mgmtServer = null;
+      conn.mgmtSocket = sock;
+      conn.mgmtBuf = '';
 
-    // Connect to the management socket after openvpn binds it
-    let mgmtRetries = 0;
-    const tryMgmt = () => {
-      if (!conn.proc) return;
-      if (mgmtRetries++ > 10) return;
-      this._connectMgmt(id).catch(() => setTimeout(tryMgmt, 1500));
-    };
-    setTimeout(tryMgmt, 1500);
+      sock.on('data', data => {
+        const raw = data.toString();
+        this._log(id, `[mgmt-raw] ${raw.replace(/\n/g, '↵')}`, 'sys');
+        conn.mgmtBuf += raw;
+        let nl;
+        while ((nl = conn.mgmtBuf.indexOf('\n')) !== -1) {
+          const line = conn.mgmtBuf.slice(0, nl).trim();
+          conn.mgmtBuf = conn.mgmtBuf.slice(nl + 1);
+          this._handleMgmtLine(id, line);
+        }
+      });
 
-    const onLine = line => {
-      line = line.trim();
-      if (!line) return;
-      // Mask the password line in logs
-      if (/Enter Password:|password:/i.test(line)) return;
-      this._log(id, line, this._lineLevel(line));
-      this._parseStdout(id, line);
-    };
+      sock.write('state\n');
+      sock.write('state on\n');
+      sock.write('hold release\n');
 
-    proc.stdout.on('data', d => d.toString().split('\n').forEach(onLine));
-    proc.stderr.on('data', d => d.toString().split('\n').forEach(onLine));
-
-    proc.on('close', code => {
-      conn.proc = null;
-      if (conn.mgmtSocket) { try { conn.mgmtSocket.destroy(); } catch (_) {} }
-      conn.mgmtSocket = null;
-      try { if (conn.tmpFile) fs.unlinkSync(conn.tmpFile); } catch (_) {}
-      conn.tmpFile = null;
-      if (conn.status !== 'disconnected') {
-        this._setStatus(id, 'disconnected');
-        this._log(id, `Process exited (${code ?? 'signal'})`, 'sys');
-      }
+      sock.on('error', () => {});
+      sock.on('close', () => { if (conn.mgmtSocket === sock) conn.mgmtSocket = null; });
     });
 
-    proc.on('error', err => {
-      conn.proc = null;
-      let msg = err.message;
-      if (/sudo: a password is required|EPERM/.test(msg))
-        msg = 'Permission denied — sudo NOPASSWD not configured. See Setup below.';
-      else if (/ENOENT/.test(msg))
-        msg = 'openvpn not found. Run: brew install openvpn';
-      this._setStatus(id, 'error');
-      this._log(id, msg, 'err');
+    conn.mgmtServer = mgmtServer;
+    mgmtServer.on('error', err => this._log(id, `[mgmt] Server error: ${err.message}`, 'err'));
+
+    mgmtServer.listen(conn.mgmtPort, '127.0.0.1', () => {
+      // Without --auth-user-pass, OpenVPN asks management for ALL credentials
+      // (main auth + static challenge) via --management-query-passwords.
+      // --static-challenge only added when TOTP is needed; omit for auth-token reconnects.
+      const needsStaticChallenge = !conn.authToken && !!conn.pendingTotp;
+
+      const proc = spawn('sudo', [
+        '-n', bin,
+        '--config', env.configFile,
+        '--management', '127.0.0.1', String(conn.mgmtPort),
+        '--management-client',
+        '--management-hold',
+        '--management-query-passwords',
+        '--auth-retry', 'none',
+        ...(needsStaticChallenge ? ['--static-challenge', 'Enter TOTP', '1'] : []),
+      ], { stdio: ['ignore', 'pipe', 'pipe'] });
+
+      conn.proc = proc;
+
+      const onLine = line => {
+        line = line.trim();
+        if (!line) return;
+        if (/Enter Password:|password:/i.test(line)) return;
+        this._log(id, line, this._lineLevel(line));
+        this._parseStdout(id, line);
+      };
+
+      proc.stdout.on('data', d => d.toString().split('\n').forEach(onLine));
+      proc.stderr.on('data', d => d.toString().split('\n').forEach(onLine));
+
+      proc.on('close', code => {
+        conn.proc = null;
+        if (conn.mgmtSocket) { try { conn.mgmtSocket.destroy(); } catch (_) {} }
+        conn.mgmtSocket = null;
+        if (conn.mgmtServer) { try { conn.mgmtServer.close(); } catch (_) {} conn.mgmtServer = null; }
+        if (conn.status !== 'disconnected') {
+          this._setStatus(id, 'disconnected');
+          this._log(id, `Process exited (${code ?? 'signal'})`, 'sys');
+        }
+      });
+
+      proc.on('error', err => {
+        conn.proc = null;
+        if (conn.mgmtServer) { try { conn.mgmtServer.close(); } catch (_) {} conn.mgmtServer = null; }
+        let msg = err.message;
+        if (/sudo: a password is required|EPERM/.test(msg))
+          msg = 'Permission denied — sudo NOPASSWD not configured. See Setup below.';
+        else if (/ENOENT/.test(msg))
+          msg = 'openvpn not found. Run: brew install openvpn';
+        this._setStatus(id, 'error');
+        this._log(id, msg, 'err');
+      });
     });
 
     return { ok: true };
@@ -199,10 +212,8 @@ class VpnManager extends EventEmitter {
 
   _forceDisconnect(id) {
     const conn = this._conns[id];
+    if (conn.mgmtServer) { try { conn.mgmtServer.close(); } catch (_) {} conn.mgmtServer = null; }
     if (conn.proc) {
-      // openvpn runs as root; we can't kill it directly from user space,
-      // but the management socket SIGTERM should have handled it.
-      // As last resort try kill (will silently fail if we lack permissions).
       try { conn.proc.kill('SIGTERM'); } catch (_) {}
     }
     setTimeout(() => {
@@ -234,7 +245,9 @@ class VpnManager extends EventEmitter {
       });
 
       sock.on('data', data => {
-        conn.mgmtBuf += data.toString();
+        const raw = data.toString();
+        this._log(id, `[mgmt-raw] ${raw.replace(/\n/g, '↵')}`, 'sys');
+        conn.mgmtBuf += raw;
         let nl;
         while ((nl = conn.mgmtBuf.indexOf('\n')) !== -1) {
           const line = conn.mgmtBuf.slice(0, nl).trim();
@@ -288,7 +301,40 @@ class VpnManager extends EventEmitter {
       return;
     }
 
-    // Password request via management socket
+    // Server sends auth-token after successful connection — cache it for TOTP-free reconnects
+    if (line.startsWith('>PASSWORD:Auth-Token:')) {
+      conn.authToken = line.slice('>PASSWORD:Auth-Token:'.length).trim();
+      conn.needsTotp = false;
+      this._log(id, '✓ Session token cached — reconnects will not need TOTP', 'sys');
+      return;
+    }
+
+    // Static challenge response — send TOTP so OpenVPN encodes it in SCRV1 format
+    if (line.startsWith('>PASSWORD:Need \'Static Challenge\'')) {
+      this._log(id, `[mgmt] ${line}`, 'sys');
+      if (conn.pendingTotp && conn.mgmtSocket) {
+        conn.mgmtSocket.write(`password "Static Challenge" ${conn.pendingTotp}\n`);
+        this._log(id, '[mgmt] Sent TOTP as static challenge response', 'sys');
+        conn.pendingTotp = null;
+      } else {
+        this._log(id, '[mgmt] Static challenge received but no TOTP available — reconnect with TOTP', 'err');
+      }
+      return;
+    }
+
+    // Credential request via management (when --management-query-passwords is active)
+    if (line.startsWith('>PASSWORD:Need \'Auth\'')) {
+      this._log(id, `[mgmt] ${line}`, 'sys');
+      const env = this._config.environments.find(e => e.id === id);
+      if (env && conn.mgmtSocket) {
+        const pw = conn.authToken || env.password;
+        conn.mgmtSocket.write(`username "Auth" ${env.username}\n`);
+        conn.mgmtSocket.write(`password "Auth" ${pw}\n`);
+        this._log(id, '[mgmt] Sent credentials', 'sys');
+      }
+      return;
+    }
+
     if (line.startsWith('>PASSWORD:')) {
       this._log(id, `[mgmt] ${line}`, 'sys');
       return;

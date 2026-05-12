@@ -2,13 +2,49 @@
   "name": "service-manager",
   "version": "1.0.0",
   "description": "Local service manager dashboard",
-  "main": "server.js",
+  "main": "electron/main.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "server": "node server.js",
+    "dev": "node server.js",
+    "electron": "electron .",
+    "build": "electron-builder --mac",
+    "build:dmg": "electron-builder --mac dmg"
   },
   "dependencies": {
     "express": "^4.18.2",
     "ws": "^8.16.0"
+  },
+  "devDependencies": {
+    "electron": "^35.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "build": {
+    "appId": "com.sociolla.service-manager",
+    "productName": "Service Manager",
+    "asar": false,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "electron/**/*",
+      "public/**/*",
+      "server.js",
+      "process-manager.js",
+      "vpn-manager.js",
+      "services.config.js",
+      "node_modules/**/*",
+      "!node_modules/.cache/**/*",
+      "!vscode-extension/**/*"
+    ],
+    "mac": {
+      "category": "public.app-category.developer-tools",
+      "target": [
+        { "target": "dmg", "arch": ["arm64"] }
+      ]
+    },
+    "dmg": {
+      "title": "Service Manager ${version}"
+    }
   }
 }
