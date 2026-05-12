@@ -26,7 +26,7 @@ function inferCmd(scripts) {
   return { cmd: null, args: [] };
 }
 
-// ── Port detection (vite config → script --port flag) ──────────────────────────
+// ── Port detection (vite config → script --port flag → env var) ────────────────
 function inferPort(dir, scripts) {
   // 1. vite.config.js / vite.config.ts server.port
   for (const name of ['vite.config.js', 'vite.config.ts']) {
@@ -41,6 +41,57 @@ function inferPort(dir, scripts) {
   for (const val of Object.values(scripts || {})) {
     const m = val?.match(/--port[= ](\d+)/i);
     if (m) return parseInt(m[1]);
+  }
+
+  // 3. process.env.SOMETHING_PORT referenced in service code → read from shared .env
+  const envPort = inferPortFromEnvVar(dir);
+  if (envPort) return envPort;
+
+  return null;
+}
+
+// Finds which env var the service uses for its port, then reads it from the shared .env.
+function inferPortFromEnvVar(dir) {
+  // Config files first (dedicated port config), server files last (may reference infra ports like REDIS)
+  const candidates = [
+    path.join(dir, 'app', 'config', 'secret.js'),
+    path.join(dir, 'src', 'config', 'secret.js'),
+    path.join(dir, 'config', 'secret.js'),
+    path.join(dir, 'src', 'server.ts'),
+    path.join(dir, 'src', 'server.js'),
+    path.join(dir, 'server.js'),
+  ];
+
+  // Infrastructure port vars that appear in service code but aren't the service's own port
+  const INFRA_PORT_RE = /^(REDIS|DB|DWH|ODOO|SMTP|MONGO)_/;
+
+  const envFile = path.join(path.dirname(dir), '.env');
+  let envContent = null;
+  if (fs.existsSync(envFile)) {
+    try { envContent = fs.readFileSync(envFile, 'utf8'); } catch (_) {}
+  }
+
+  // Strategy A: find process.env.*_PORT in service code, look it up in shared .env
+  if (envContent) {
+    for (const file of candidates) {
+      if (!fs.existsSync(file)) continue;
+      try {
+        const content = fs.readFileSync(file, 'utf8');
+        const m = content.match(/process\.env\.([A-Z][A-Z0-9_]*_PORT\b)/);
+        if (!m) continue;
+        const varName = m[1];
+        if (INFRA_PORT_RE.test(varName)) continue;
+        const pm = envContent.match(new RegExp(`^${varName}\\s*=\\s*(\\d+)`, 'm'));
+        if (pm) return parseInt(pm[1]);
+      } catch (_) {}
+    }
+  }
+
+  // Strategy B: slug-based substring match against shared .env (fallback for hardcoded configs)
+  if (envContent) {
+    const slug = path.basename(dir).toUpperCase().replace(/-/g, '_');
+    const pm = envContent.match(new RegExp(`^[A-Z_]*${slug}[A-Z_]*_PORT\\s*=\\s*(\\d+)`, 'm'));
+    if (pm) return parseInt(pm[1]);
   }
 
   return null;
