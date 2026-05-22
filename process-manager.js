@@ -32,6 +32,7 @@ class ProcessManager extends EventEmitter {
         cmd: cfg.cmd,
         args: cfg.args,
         note: cfg.note || null,
+        afterStartKeys: cfg.afterStartKeys || null,
         // spawn-mode state
         status: 'stopped',
         pid: null,
@@ -39,6 +40,7 @@ class ProcessManager extends EventEmitter {
         startTime: null,
         exitCode: null,
         errorMsg: null,
+        afterStartSent: false,
         // tracking mode: 'spawn' | 'vscode' | 'external'
         mode: 'spawn',
       };
@@ -49,6 +51,10 @@ class ProcessManager extends EventEmitter {
     this._startPortPoller();
     this._probeVSCode();
     setInterval(() => this._probeVSCode(), 8000);
+
+    // When VS Code (re)connects, reattach managed terminals so the extension's
+    // map is repopulated — prevents duplicate tab creation on next start.
+    this.on('vscode_connected', () => this._reattachVSCodeTerminals());
   }
 
   // ── Public API ─────────────────────────────────────────────────────────────
@@ -132,19 +138,27 @@ class ProcessManager extends EventEmitter {
     }
 
     switch (type) {
-      case 'terminal_closed':
+      case 'terminal_closed': {
+        const port = this._services[id]?.port;
         this._setStatus(id, 'stopped', { mode: 'spawn', pid: null });
         this._addLog(id, 'VS Code terminal was closed.', 'sys');
+        // Kill any process still holding the port — terminal close doesn't always
+        // send SIGHUP cleanly through npm/nodemon wrappers.
+        if (port) {
+          const { exec } = require('child_process');
+          exec(`lsof -ti :${port} | xargs kill -9 2>/dev/null`, () => {});
+        }
         break;
+      }
 
       case 'cmd_started':
         this._setStatus(id, 'starting');
         this._addLog(id, `$ ${event.cmd || ''}`, 'sys');
-        // No-port services can't be detected via port polling — the starting
-        // timer will transition to 'running' after the grace period.
+        console.log(`[SM diag] cmd_started id=${id} mode=${this._services[id]?.mode} afterStartKeys=${JSON.stringify(this._services[id]?.afterStartKeys)}`);
         break;
 
       case 'cmd_ended':
+        console.log(`[SM diag] cmd_ended id=${id} exitCode=${event.exitCode} status=${this._services[id]?.status}`);
         // For no-port services the process exiting IS the definitive signal.
         // For port-based services the port poller will pick up the disappearance.
         if (event.exitCode === 0 || event.exitCode == null) {
@@ -157,7 +171,6 @@ class ProcessManager extends EventEmitter {
       case 'logs':
         if (Array.isArray(event.lines)) {
           event.lines.forEach(line => {
-            // Heuristic: treat lines containing 'error' or 'ERR' as error level
             const level = /error|ERR|\bfail/i.test(line) ? 'err' : 'out';
             this._addLog(id, line.trimEnd(), level);
           });
@@ -309,7 +322,8 @@ class ProcessManager extends EventEmitter {
     this._addLog(id, 'Sending stop signal to VS Code terminal…', 'sys');
     this._setStatus(id, 'stopping');
 
-    this._callVSCode('POST', '/terminal/stop', { id }).catch(() => {});
+    const cwd = path.join(this._projectsDir, id);
+    this._callVSCode('POST', '/terminal/stop', { id, cwd, closeAfterStop: true }).catch(() => {});
 
     // Fallback: if the service is still on the port after 4s, kill it by port
     if (svc.port) {
@@ -335,6 +349,17 @@ class ProcessManager extends EventEmitter {
 
   focusVSCode(id) {
     this._callVSCode('POST', '/terminal/focus', { id }).catch(() => {});
+  }
+
+  /** Re-associate terminals after VS Code reconnects (extension map was reset). */
+  _reattachVSCodeTerminals() {
+    for (const svc of Object.values(this._services)) {
+      if (svc.mode === 'vscode' && (svc.status === 'running' || svc.status === 'starting')) {
+        const cwd = path.join(this._projectsDir, svc.id);
+        // No cmd — only reattach, do not re-run the start command.
+        this._callVSCode('POST', '/terminal/open', { id: svc.id, name: svc.id, cwd }).catch(() => {});
+      }
+    }
   }
 
   /** Send Ctrl+C to a worker terminal opened by runWorkerScript */
@@ -549,8 +574,8 @@ class ProcessManager extends EventEmitter {
         } else if (alive && (svc.status === 'starting' || svc.status === 'error')) {
           // Port came up — covers vscode mode, spawn mode, and recovery after error/timeout
           this._setStatus(svc.id, 'running');
-        } else if (!alive && svc.status === 'running' && svc.mode === 'external') {
-          // Externally-started service stopped
+        } else if (!alive && svc.status === 'running' && (svc.mode === 'external' || svc.mode === 'vscode')) {
+          // Service stopped — covers external processes and VS Code terminal kills (Ctrl+C)
           this._setStatus(svc.id, 'stopped', { mode: 'spawn' });
           this._addLog(svc.id, `No longer reachable on port ${svc.port}.`, 'sys');
         }
@@ -582,7 +607,22 @@ class ProcessManager extends EventEmitter {
   _setStatus(id, status, extra = {}) {
     const svc = this._services[id];
     if (!svc) return;
+    const prevStatus = svc.status;
+    if (status === 'stopped' || status === 'error') svc.afterStartSent = false;
     Object.assign(svc, { status }, extra);
+
+    // Send afterStartKeys once when the service first becomes 'running' in vscode mode
+    if (status === 'running' && prevStatus === 'starting') {
+      console.log(`[SM diag] starting→running id=${id} mode=${svc.mode} afterStartKeys=${JSON.stringify(svc.afterStartKeys)} afterStartSent=${svc.afterStartSent}`);
+    }
+    if (status === 'running' && prevStatus === 'starting'
+        && svc.mode === 'vscode' && svc.afterStartKeys?.length && !svc.afterStartSent) {
+      svc.afterStartSent = true;
+      const keys = svc.afterStartKeys;
+      setTimeout(() => {
+        this._callVSCode('POST', '/terminal/keys', { id, keys }).catch(() => {});
+      }, 2000);
+    }
 
     // Arm a watchdog when entering 'starting'; disarm when leaving it
     if (status === 'starting') {
@@ -604,6 +644,7 @@ class ProcessManager extends EventEmitter {
     if (svc && !svc.port) {
       // Give 10s for the process to crash; if still starting, assume it's running
       this._startingTimers[id] = setTimeout(() => {
+        console.log(`[SM diag] 10s timer id=${id} status=${svc.status} mode=${svc.mode} afterStartKeys=${JSON.stringify(svc.afterStartKeys)} afterStartSent=${svc.afterStartSent}`);
         if (svc.status === 'starting') {
           this._setStatus(id, 'running');
           this._addLog(id, 'No port configured — assumed running.', 'sys');

@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Menu, shell, dialog } = require('electron');
+const { app, BrowserWindow, Menu, shell, dialog, screen } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -62,6 +62,8 @@ function createWindow() {
   mainWindow.loadURL('http://localhost:9999');
 
   mainWindow.once('ready-to-show', () => {
+    const { x, y, width, height } = screen.getPrimaryDisplay().workArea;
+    mainWindow.setBounds({ x, y, width, height });
     mainWindow.show();
     mainWindow.focus();
   });

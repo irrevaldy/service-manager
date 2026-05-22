@@ -108,6 +108,18 @@ function formatName(id, pkg) {
   return pkgName.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
 }
 
+// ── Per-service overrides ──────────────────────────────────────────────────────
+// afterStartTrigger: when a log line matches `match`, send `keys` to the terminal.
+// Expo (b2b-apps) shows an interactive menu — we auto-press 'w' to open the web build.
+// afterStartKeys: keys sent to the terminal once the service transitions to 'running'.
+// For no-port services (Expo) this fires after the 10s assumed-running timer.
+// For port-based services it fires when the port comes up.
+const OVERRIDES = {
+  'b2b-apps': {
+    afterStartKeys: ['w'],
+  },
+};
+
 // ── Discovery ──────────────────────────────────────────────────────────────────
 const TYPE_ORDER = { api: 0, analytics: 1, b2b: 2, worker: 3, frontend: 4 };
 
@@ -150,6 +162,7 @@ function discover() {
         cmd,
         args,
         ...(isWorker ? { note: 'No unified entry point — launch individual worker scripts manually.' } : {}),
+        ...(OVERRIDES[id] || {}),
       };
     })
     .filter(Boolean)
@@ -190,6 +203,7 @@ function discoverOne(id) {
     cmd,
     args,
     ...(isWorker ? { note: 'No unified entry point — launch individual worker scripts manually.' } : {}),
+    ...(OVERRIDES[id] || {}),
   };
 }
 

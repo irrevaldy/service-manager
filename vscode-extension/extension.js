@@ -6,7 +6,8 @@ const http = require('http');
 const BRIDGE_PORT = 9998;       // this extension's server (service manager calls us)
 const SM_PORT = 9999;           // service manager server (we call it)
 
-// serviceId → { terminal: vscode.Terminal, logBuffer: string[], flushTimer }
+// serviceId → { terminal, logBuffer, flushTimer, pendingClose }
+// pendingClose: setTimeout handle — cancelled if the terminal is reused (restart flow)
 const managed = new Map();
 
 /** Called by VS Code when the extension is first activated */
@@ -35,12 +36,21 @@ function activate(context) {
   // ── Terminal close → notify service manager ─────────────────────────────
   context.subscriptions.push(
     vscode.window.onDidCloseTerminal(async (terminal) => {
+      // Fast path: terminal is in the managed map
       for (const [id, entry] of managed) {
         if (entry.terminal === terminal) {
+          if (entry.pendingClose) clearTimeout(entry.pendingClose);
           managed.delete(id);
           postToSM('/api/vscode-event', { type: 'terminal_closed', id });
-          break;
+          return;
         }
+      }
+      // Fallback: terminal was created by SM (has SM_SERVICE_ID) but isn't in
+      // managed yet — e.g. user closes the tab before reattach completes after
+      // an extension host reload. Read the id directly from creationOptions.
+      const serviceId = terminal.creationOptions?.env?.SM_SERVICE_ID;
+      if (serviceId) {
+        postToSM('/api/vscode-event', { type: 'terminal_closed', id: serviceId });
       }
     })
   );
@@ -63,8 +73,13 @@ function activate(context) {
         for (const [id, entry] of managed) {
           if (entry.terminal === terminal) {
             postToSM('/api/vscode-event', { type: 'cmd_ended', id, exitCode });
-            break;
+            return;
           }
+        }
+        // Fallback: not in managed map — read SM_SERVICE_ID from creationOptions
+        const serviceId = terminal.creationOptions?.env?.SM_SERVICE_ID;
+        if (serviceId) {
+          postToSM('/api/vscode-event', { type: 'cmd_ended', id: serviceId, exitCode });
         }
       })
     );
@@ -90,34 +105,47 @@ function handleRequest(req, res) {
 
     // Open (or focus) a terminal for a service
     if (req.method === 'POST' && req.url === '/terminal/open') {
-      const { id, name, cwd, cmd } = data;
+      const { id, cwd, cmd } = data;
       if (!id || !cwd) return json(res, 400, { error: 'id and cwd required' });
 
-      // 1. Check our managed map first (fastest path)
+      // 1. Check managed map first (fastest path)
       const existing = managed.get(id);
       if (existing && vscode.window.terminals.includes(existing.terminal)) {
+        // Cancel any pending auto-close — terminal is being reused (restart flow)
+        if (existing.pendingClose) {
+          clearTimeout(existing.pendingClose);
+          existing.pendingClose = null;
+        }
         existing.terminal.show(false);
         if (cmd) { await delay(300); existing.terminal.sendText(cmd, true); }
         return json(res, 200, { ok: true, reused: true });
       }
 
-      // 2. Search open terminals by cwd — catches the case where SSM restarted
-      //    and the managed map was reset but the tab is still open.
+      // 2. Search by SM_SERVICE_ID env var — survives extension host restarts
+      const byEnv = findByServiceId(id);
+      if (byEnv) {
+        managed.set(id, mkEntry(byEnv));
+        byEnv.show(false);
+        if (cmd) { await delay(300); byEnv.sendText(cmd, true); }
+        return json(res, 200, { ok: true, reused: true });
+      }
+
+      // 3. cwd fallback — for terminals opened before the env-var scheme
       const byCwd = vscode.window.terminals.find(t => {
         const tc = t.creationOptions?.cwd;
         return (typeof tc === 'string' ? tc : tc?.fsPath) === cwd;
       });
       if (byCwd) {
-        managed.set(id, { terminal: byCwd, logBuffer: [], flushTimer: null });
+        managed.set(id, mkEntry(byCwd));
         byCwd.show(false);
         if (cmd) { await delay(300); byCwd.sendText(cmd, true); }
         return json(res, 200, { ok: true, reused: true });
       }
 
-      // 3. Nothing found — create a fresh terminal without an explicit name so
-      //    VS Code shows the default "zsh <folder>" format in the tab.
-      const terminal = vscode.window.createTerminal({ cwd });
-      managed.set(id, { terminal, logBuffer: [], flushTimer: null });
+      // 4. Create a fresh terminal. No explicit name → VS Code shows the default
+      //    "zsh (folder)" format. SM_SERVICE_ID lets us re-find it after restarts.
+      const terminal = vscode.window.createTerminal({ cwd, env: { SM_SERVICE_ID: id } });
+      managed.set(id, mkEntry(terminal));
       terminal.show(false);
       if (cmd) { await delay(700); terminal.sendText(cmd, true); }
 
@@ -135,22 +163,94 @@ function handleRequest(req, res) {
       return json(res, 404, { error: 'Terminal not found' });
     }
 
-    // Send Ctrl+C to stop the running process inside the terminal
+    // Send raw key(s) to a terminal — used for interactive CLIs like Expo
+    // that read single characters (raw mode). No newline appended.
+    if (req.method === 'POST' && req.url === '/terminal/keys') {
+      const { id, keys } = data;
+      let terminal = null;
+      const existing = managed.get(id);
+      if (existing && vscode.window.terminals.includes(existing.terminal)) {
+        terminal = existing.terminal;
+      } else {
+        terminal = findByServiceId(id);
+      }
+      if (terminal && Array.isArray(keys)) {
+        keys.forEach(k => terminal.sendText(k, false));
+      }
+      return json(res, 200, { ok: true });
+    }
+
+    // Stop the process running inside the terminal.
+    // If the terminal was created by us (has SM_SERVICE_ID), the tab is also
+    // auto-closed after the process exits — no flag needed from the server.
     if (req.method === 'POST' && req.url === '/terminal/stop') {
-      const { id } = data;
-      const entry = managed.get(id);
-      if (entry && vscode.window.terminals.includes(entry.terminal)) {
-        // First Ctrl+C stops the process; second exits nodemon's watch loop
-        entry.terminal.sendText('\x03');
-        setTimeout(() => entry.terminal.sendText('\x03'), 400);
+      const { id, cwd } = data;
+
+      // Resolve: managed → env-var → cwd fallback
+      let entry = null;
+      const existing = managed.get(id);
+      if (existing && vscode.window.terminals.includes(existing.terminal)) {
+        entry = existing;
+      } else {
+        const byEnv = findByServiceId(id);
+        if (byEnv) {
+          entry = mkEntry(byEnv);
+          managed.set(id, entry);
+        } else if (cwd) {
+          const byCwd = vscode.window.terminals.find(t => {
+            const tc = t.creationOptions?.cwd;
+            return (typeof tc === 'string' ? tc : tc?.fsPath) === cwd;
+          });
+          if (byCwd) {
+            entry = mkEntry(byCwd);
+            managed.set(id, entry);
+          }
+        }
+      }
+
+      if (entry) {
+        const terminal = entry.terminal;
+
+        // Ctrl+C x2: first stops the process, second exits nodemon's watch loop
+        terminal.sendText('\x03');
+        setTimeout(() => terminal.sendText('\x03'), 400);
+
+        // Auto-close the tab if this is a terminal we own (SM_SERVICE_ID present).
+        // Cancel any previous close timer first (defensive).
+        if (entry.pendingClose) clearTimeout(entry.pendingClose);
+
+        const isOwned = terminal.creationOptions?.env?.SM_SERVICE_ID === id;
+        if (isOwned) {
+          entry.pendingClose = setTimeout(() => {
+            const e = managed.get(id);
+            // Only dispose if the timer wasn't cancelled by a restart (/terminal/open)
+            if (e && e.pendingClose !== null) {
+              e.pendingClose = null;
+              e.terminal.dispose();
+            }
+          }, 2500);
+        }
+
         return json(res, 200, { ok: true });
       }
-      // Terminal already gone — that's fine, just report ok
-      return json(res, 200, { ok: true, note: 'terminal already closed' });
+
+      return json(res, 200, { ok: true, note: 'terminal not found' });
     }
 
     json(res, 404, { error: 'Not found' });
   });
+}
+
+// ── Terminal lookup ──────────────────────────────────────────────────────────
+
+function findByServiceId(id) {
+  return vscode.window.terminals.find(
+    t => t.creationOptions?.env?.SM_SERVICE_ID === id
+  ) || null;
+}
+
+function mkEntry(terminal) {
+  return { terminal, logBuffer: [], flushTimer: null, pendingClose: null };
 }
 
 // ── Log batching ────────────────────────────────────────────────────────────
@@ -175,7 +275,7 @@ function postToSM(path, body) {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
   });
-  req.on('error', () => {}); // silently ignore if SM is not running
+  req.on('error', () => {});
   req.write(payload);
   req.end();
 }
@@ -193,15 +293,14 @@ function delay(ms) {
   return new Promise(r => setTimeout(r, ms));
 }
 
-// Strips ANSI escape sequences and carriage returns from terminal output
 function stripAnsi(str) {
   return str
-    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')  // CSI sequences
-    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '') // OSC sequences
-    .replace(/\x1b[()][AB012]/g, '')           // charset designators
-    .replace(/\x1b[=>]/g, '')                  // keypad modes
+    .replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, '')
+    .replace(/\x1b\][^\x07\x1b]*(\x07|\x1b\\)/g, '')
+    .replace(/\x1b[()][AB012]/g, '')
+    .replace(/\x1b[=>]/g, '')
     .replace(/\r/g, '')
-    .replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, ''); // other control chars
+    .replace(/[\x00-\x08\x0b-\x0c\x0e-\x1f\x7f]/g, '');
 }
 
 function deactivate() {}
