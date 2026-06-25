@@ -157,16 +157,20 @@ class ProcessManager extends EventEmitter {
         console.log(`[SM diag] cmd_started id=${id} mode=${this._services[id]?.mode} afterStartKeys=${JSON.stringify(this._services[id]?.afterStartKeys)}`);
         break;
 
-      case 'cmd_ended':
+      case 'cmd_ended': {
         console.log(`[SM diag] cmd_ended id=${id} exitCode=${event.exitCode} status=${this._services[id]?.status}`);
-        // For no-port services the process exiting IS the definitive signal.
-        // For port-based services the port poller will pick up the disappearance.
-        if (event.exitCode === 0 || event.exitCode == null) {
+        const code = event.exitCode;
+        // SIGINT (Ctrl-C → 130) and SIGTERM (→ 143) are intentional stops, not errors.
+        // Without this, the port poller's stopped-detection is bypassed because it
+        // only watches status==='running', leaving the service stuck as 'error'.
+        const isClean = code === 0 || code == null || code === 130 || code === 143;
+        if (isClean) {
           this._setStatus(id, 'stopped');
         } else {
-          this._setStatus(id, 'error', { exitCode: event.exitCode, errorMsg: `Exited with code ${event.exitCode}` });
+          this._setStatus(id, 'error', { exitCode: code, errorMsg: `Exited with code ${code}` });
         }
         break;
+      }
 
       case 'logs':
         if (Array.isArray(event.lines)) {
@@ -174,6 +178,14 @@ class ProcessManager extends EventEmitter {
             const level = /error|ERR|\bfail/i.test(line) ? 'err' : 'out';
             this._addLog(id, line.trimEnd(), level);
           });
+          // Detect TypeScript compilation errors while still starting — ts-node-dev
+          // keeps watching after a compile error so cmd_ended never fires and the
+          // port never comes up; without this the status stays 'starting' for 60s.
+          const svc = this._services[id];
+          if (svc && svc.status === 'starting' && /\berror TS\d+:/i.test(event.lines.join('\n'))) {
+            this._addLog(id, 'TypeScript compilation error — service cannot start. Fix the error and restart.', 'err');
+            this._setStatus(id, 'error', { errorMsg: 'TypeScript compilation error' });
+          }
         }
         break;
     }
@@ -300,6 +312,7 @@ class ProcessManager extends EventEmitter {
       return;
     }
 
+    const wasError = svc.status === 'error'; // capture before _setStatus overwrites it
     const cmd = svc.cmd + ' ' + svc.args.join(' ');
     this._setStatus(id, 'starting', { mode: 'vscode' });
     this._addLog(id, `Opening VS Code terminal — ${cmd}`, 'sys');
@@ -309,6 +322,7 @@ class ProcessManager extends EventEmitter {
       name: id,    // use service ID so tab shows e.g. "ms-sso-broker" not "SSO Broker"
       cwd,
       cmd,
+      forceNew: wasError, // replace stale error terminal with a clean one
     }).catch(() => {
       // VS Code went away — fall back to spawn
       this._vscodeAvailable = false;

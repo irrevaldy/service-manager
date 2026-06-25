@@ -166,6 +166,11 @@ class VpnManager extends EventEmitter {
         if (conn.mgmtSocket) { try { conn.mgmtSocket.destroy(); } catch (_) {} }
         conn.mgmtSocket = null;
         if (conn.mgmtServer) { try { conn.mgmtServer.close(); } catch (_) {} conn.mgmtServer = null; }
+        // Auth-token is bound to the TLS session — once the process exits the
+        // session is dead. Clear it so the TOTP form appears immediately on the
+        // next connect attempt instead of failing silently with a stale token.
+        conn.authToken  = null;
+        conn.needsTotp  = true;
         if (conn.status !== 'disconnected') {
           this._setStatus(id, 'disconnected');
           this._log(id, `Process exited (${code ?? 'signal'})`, 'sys');

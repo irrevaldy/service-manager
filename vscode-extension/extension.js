@@ -23,6 +23,21 @@ function activate(context) {
     vscode.window.onDidWriteTerminalData(({ terminal, data }) => {
       for (const [id, entry] of managed) {
         if (entry.terminal === terminal) {
+          // Fallback cmd_ended: detect VS Code shell integration OSC 633;D sequence in
+          // raw data before stripAnsi removes it. This fires when the shell regains
+          // control after a process exits, covering cases where onDidEndTerminalShellExecution
+          // doesn't trigger (Expo/Metro interactive mode, old VS Code, broken shell integration).
+          // Dedup within 5s to avoid double-firing when the API event also triggers.
+          if (/\x1b]633;D/.test(data)) {
+            const now = Date.now();
+            if (now - entry.lastCmdEnd > 5000) {
+              entry.lastCmdEnd = now;
+              const m = data.match(/\x1b]633;D(?:;(\d+))?/);
+              const exitCode = m?.[1] !== undefined ? parseInt(m[1]) : undefined;
+              postToSM('/api/vscode-event', { type: 'cmd_ended', id, exitCode });
+            }
+          }
+
           const clean = stripAnsi(data);
           if (!clean.trim()) return;
           entry.logBuffer.push(clean);
@@ -61,6 +76,7 @@ function activate(context) {
       vscode.window.onDidStartTerminalShellExecution(({ terminal, execution }) => {
         for (const [id, entry] of managed) {
           if (entry.terminal === terminal) {
+            entry.lastCmdEnd = 0; // reset so the next stop is detectable
             postToSM('/api/vscode-event', { type: 'cmd_started', id, cmd: execution.commandLine?.value });
             break;
           }
@@ -105,8 +121,22 @@ function handleRequest(req, res) {
 
     // Open (or focus) a terminal for a service
     if (req.method === 'POST' && req.url === '/terminal/open') {
-      const { id, cwd, cmd } = data;
+      const { id, cwd, cmd, forceNew } = data;
       if (!id || !cwd) return json(res, 400, { error: 'id and cwd required' });
+
+      // forceNew: the service was in error state — dispose the stale terminal so
+      // the code falls through to creating a fresh one below.
+      if (forceNew) {
+        const prev = managed.get(id);
+        if (prev) {
+          if (prev.pendingClose) clearTimeout(prev.pendingClose);
+          prev.terminal.dispose();
+          managed.delete(id);
+        } else {
+          const byEnv = findByServiceId(id);
+          if (byEnv) byEnv.dispose();
+        }
+      }
 
       // 1. Check managed map first (fastest path)
       const existing = managed.get(id);
@@ -250,7 +280,7 @@ function findByServiceId(id) {
 }
 
 function mkEntry(terminal) {
-  return { terminal, logBuffer: [], flushTimer: null, pendingClose: null };
+  return { terminal, logBuffer: [], flushTimer: null, pendingClose: null, lastCmdEnd: 0 };
 }
 
 // ── Log batching ────────────────────────────────────────────────────────────

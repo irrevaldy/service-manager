@@ -118,6 +118,27 @@ const OVERRIDES = {
   'b2b-apps': {
     afterStartKeys: ['w'],
   },
+  // AdonisJS v4 project — `adonis` CLI is not installed globally/locally,
+  // so `npm run dev` (adonis serve --dev) always fails. Use npm start instead.
+  'wms-api': {
+    cmd: 'npm',
+    args: ['start'],
+  },
+  // node_modules not installed — auto-install before serving.
+  // Moved off 8081 (conflicts with b2b-apps Metro bundler).
+  'hrms-web': {
+    cmd: 'npm install && node_modules/.bin/vue-cli-service serve --port 8084',
+    args: [],
+    port: 8084,
+  },
+  // Moved off 8081 (conflicts with b2b-apps Metro bundler and hrms-web).
+  // 8083 is SSO server, 8085 is planogram-web — using 8086 instead.
+  // Call vue-cli-service directly to avoid duplicate --port flags from the script.
+  'sociolla-admin': {
+    cmd: 'node_modules/.bin/vue-cli-service serve --port 8086',
+    args: [],
+    port: 8086,
+  },
 };
 
 // ── Discovery ──────────────────────────────────────────────────────────────────
